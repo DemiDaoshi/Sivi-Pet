@@ -3,6 +3,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.rag_manager import preload_dependencies
+
+# torch обязан загрузиться до PyQt5, иначе на Windows падает c10.dll (WinError 1114).
+preload_dependencies()
+
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout,
                              QLabel, QLineEdit, QMessageBox, QPushButton,

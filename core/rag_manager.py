@@ -12,6 +12,28 @@ QUERY_PREFIX = "query: "
 REQUIRED_PACKAGES = ("chromadb", "sentence_transformers")
 
 
+def missing_dependencies() -> list[str]:
+    """Пакеты RAG, которых нет в окружении (проверка без импорта)."""
+    return [name for name in REQUIRED_PACKAGES if importlib.util.find_spec(name) is None]
+
+
+def preload_dependencies() -> bool:
+    """Загружает torch заранее.
+
+    На Windows torch и Qt конфликтуют по DLL: если Qt загрузится первым,
+    импорт torch падает с WinError 1114 (c10.dll). Поэтому GUI вызывает это
+    до импорта PyQt5. Стоит ~1 с, остальные зависимости остаются ленивыми.
+    """
+    if missing_dependencies():
+        return False
+    try:
+        import torch  # noqa: F401
+    except Exception as e:
+        print(f"[RAG] Не удалось предзагрузить torch: {type(e).__name__}: {e}")
+        return False
+    return True
+
+
 class RagManager:
     """Поиск по data/*.md через эмбеддинги и ChromaDB.
 
@@ -27,8 +49,7 @@ class RagManager:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-        self.missing_dependencies = [name for name in REQUIRED_PACKAGES
-                                     if importlib.util.find_spec(name) is None]
+        self.missing_dependencies = missing_dependencies()
         self.error = None
 
         self._encoder = None
