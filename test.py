@@ -91,8 +91,22 @@ def test_rag_helper():
     chunks = rag._split_text("a" * 250)
     check("разбиение завершается при overlap == size", len(chunks) > 0)
     check("размер фрагмента не превышен", all(len(c) <= 100 for c in chunks))
-    check("available согласован с missing_dependencies",
-          rag.available == (not rag.missing_dependencies), rag.missing_dependencies)
+    check("available согласован с причиной недоступности",
+          rag.available == (rag.unavailable_reason() is None), rag.unavailable_reason())
+
+    # сбой предзагрузки torch (WinError 1114) должен делать RAG недоступным
+    import core.rag_manager as rm
+    if not rm.missing_dependencies():
+        rm._preload_error = "OSError: WinError 1114"
+        try:
+            broken = RagManager()
+            check("сбой preload -> RAG недоступен", broken.available is False)
+            check("причина упоминает torch", "torch" in (broken.unavailable_reason() or ""),
+                  broken.unavailable_reason())
+            check("инструмент сообщает причину",
+                  "1114" in (ToolManager(broken).handle("[RAG: тест]") or ""))
+        finally:
+            rm._preload_error = None
 
 
 class _FakeClient:
@@ -109,8 +123,14 @@ class _FakeRag:
     available = True
     missing_dependencies = []
 
+    def __init__(self, distances=(0.2, 0.25, 0.3)):
+        self.distances = distances
+
+    def search_with_scores(self, query, top_k=3):
+        return [(f"ФРАГМЕНТ-{i + 1}", d) for i, d in enumerate(self.distances[:top_k])]
+
     def search(self, query, top_k=3):
-        return ["ФРАГМЕНТ-1"]
+        return [document for document, _ in self.search_with_scores(query, top_k)]
 
 
 def test_chat_engine():
@@ -143,8 +163,42 @@ def test_chat_engine():
     os.remove(history.filepath)
 
 
+def test_forced_rag():
+    print("[5] Переключатель RAG (принудительный поиск)")
+    history = HistoryManager(filepath=tmp_path("sivi_test_forced.json"))
+    history.clear()
+
+    client = _FakeClient(["Ответ по контексту"])
+    result = ChatEngine(client, history, ToolManager(_FakeRag())).send(
+        "сколько стоит 1000 запросов?", force_rag=True)
+
+    check("один запрос к LLM вместо двух", len(client.calls) == 1)
+    check("RAG использован", result.used_rag is True)
+    check("фрагментов три", result.fragments == 3)
+    check("поиск шёл по сообщению пользователя",
+          "сколько стоит 1000 запросов?" in client.calls[0][-1]["content"],
+          client.calls[0][-1]["content"][:80])
+    check("история не засорена служебным контекстом",
+          [m["role"] for m in history.messages] == ["system", "user", "assistant"])
+    check("контекст ушёл ролью user", client.calls[0][-1]["role"] == "user")
+
+    client = _FakeClient(["Отвечаю сам"])
+    result = ChatEngine(client, history, ToolManager(_FakeRag(distances=(0.9, 0.95)))).send(
+        "какая погода в Москве?", force_rag=True)
+    check("нерелевантные фрагменты отсечены порогом",
+          result.used_rag is False and result.fragments == 0, result)
+
+    client = _FakeClient(["[RAG: погода]", "Отвечаю сам"])
+    ChatEngine(client, history, ToolManager(_FakeRag(distances=(0.9,)))).send("погода?")
+    check("в режиме модели слабые фрагменты тоже отсекаются",
+          "ничего не найдено" in client.calls[1][-1]["content"],
+          client.calls[1][-1]["content"][:80])
+
+    os.remove(history.filepath)
+
+
 def test_live():
-    print("[5] Живой LM Studio")
+    print("[6] Живой LM Studio")
     client = LmClient()
     try:
         answer = client.send_message(
@@ -162,6 +216,7 @@ def main():
     test_tools()
     test_rag_helper()
     test_chat_engine()
+    test_forced_rag()
     if "--live" in sys.argv:
         test_live()
 

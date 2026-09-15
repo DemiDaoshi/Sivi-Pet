@@ -9,9 +9,9 @@ from core.rag_manager import preload_dependencies
 preload_dependencies()
 
 from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout,
-                             QLabel, QLineEdit, QMessageBox, QPushButton,
-                             QTextEdit, QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame,
+                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                             QPushButton, QTextEdit, QVBoxLayout, QWidget)
 
 from core.chat_engine import ChatEngine
 from core.history_manager import HistoryManager, load_profiles
@@ -28,18 +28,19 @@ class RequestThread(QThread):
     """Выполняет один ход диалога, чтобы не морозить интерфейс."""
 
     # Не перекрываем встроенный QThread.finished.
-    responded = pyqtSignal(str, bool)  # ответ, был ли использован RAG
+    responded = pyqtSignal(str, bool, int)  # ответ, был ли RAG, сколько фрагментов
     failed = pyqtSignal(str)
 
-    def __init__(self, engine: ChatEngine, text: str):
+    def __init__(self, engine: ChatEngine, text: str, force_rag: bool = False):
         super().__init__()
         self.engine = engine
         self.text = text
+        self.force_rag = force_rag
 
     def run(self):
         try:
-            result = self.engine.send(self.text)
-            self.responded.emit(result.answer, result.used_rag)
+            result = self.engine.send(self.text, force_rag=self.force_rag)
+            self.responded.emit(result.answer, result.used_rag, result.fragments)
         except LmClientError as e:
             self.failed.emit(str(e))
         except Exception as e:  # поток не должен падать молча
@@ -74,6 +75,12 @@ class ChatWindow(QWidget):
         for name in self.profiles.keys():
             self.profile_combo.addItem(name)
 
+        self.rag_check = QCheckBox("Искать в базе знаний")
+        self.rag_check.setToolTip(
+            "Включено: перед ответом ищем по базе знаний по тексту вашего сообщения.\n"
+            "Выключено: модель сама решает, вызвать ли поиск через [RAG: ...]."
+        )
+
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
 
@@ -91,6 +98,7 @@ class ChatWindow(QWidget):
         profile_row = QHBoxLayout()
         profile_row.addWidget(QLabel("Профиль:"))
         profile_row.addWidget(self.profile_combo, 1)
+        profile_row.addWidget(self.rag_check)
 
         buttons_row = QHBoxLayout()
         buttons_row.addWidget(self.send_button)
@@ -113,12 +121,12 @@ class ChatWindow(QWidget):
         self.profile_combo.currentTextChanged.connect(self.on_profile_changed)
 
         self.set_status(COLOR_IDLE, self._startup_status())
+        self.rag_check.setEnabled(self.rag.available)
 
     def _startup_status(self) -> str:
         if self.rag.available:
             return "Готов. База знаний доступна (RAG индексируется при первом запросе)."
-        return ("Готов. RAG недоступен: нет пакетов "
-                f"{', '.join(self.rag.missing_dependencies)}.")
+        return f"Готов. RAG недоступен: {self.rag.unavailable_reason()}."
 
     # --- Профили и история -------------------------------------------------
 
@@ -156,7 +164,7 @@ class ChatWindow(QWidget):
         self.input_field.clear()
         self.set_busy(True)
 
-        self.thread = RequestThread(self.engine, text)
+        self.thread = RequestThread(self.engine, text, self.rag_check.isChecked())
         self.thread.responded.connect(self.on_response)
         self.thread.failed.connect(self.on_error)
         self.thread.finished.connect(self.on_thread_finished)
@@ -181,11 +189,20 @@ class ChatWindow(QWidget):
 
     # --- Обратные вызовы потока -------------------------------------------
 
-    def on_response(self, answer: str, used_rag: bool):
+    def on_response(self, answer: str, used_rag: bool, fragments: int):
         self.update_display()  # история уже обновлена движком внутри потока
         self.history.force_save()
-        marker = " (использован RAG)" if used_rag else ""
-        self.set_status(COLOR_IDLE, f"Готов{marker}")
+        if not self.rag.available:
+            status = f"Готов. RAG недоступен: {self.rag.unavailable_reason()}."
+        elif used_rag and fragments:
+            status = f"Готов. RAG: {fragments} фрагм."
+        elif used_rag:
+            status = "Готов. Использован RAG."
+        elif self.rag_check.isChecked():
+            status = "Готов. В базе знаний ничего подходящего не найдено."
+        else:
+            status = "Готов"
+        self.set_status(COLOR_IDLE, status)
 
     def on_error(self, error_msg: str):
         self.update_display()
@@ -201,6 +218,7 @@ class ChatWindow(QWidget):
         self.send_button.setEnabled(not busy)
         self.input_field.setEnabled(not busy)
         self.profile_combo.setEnabled(not busy)
+        self.rag_check.setEnabled(not busy and self.rag.available)
         if busy:
             self.set_status(COLOR_BUSY, "Думаю...")
 

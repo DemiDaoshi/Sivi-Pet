@@ -11,10 +11,18 @@ QUERY_PREFIX = "query: "
 
 REQUIRED_PACKAGES = ("chromadb", "sentence_transformers")
 
+# Порог релевантности (L2-дистанция): ниже — фрагмент считаем подходящим.
+# Откалибровано на multilingual-e5-small: свои темы 0.26–0.32, посторонние 0.36–0.47.
+MAX_RELEVANT_DISTANCE = 0.34
+
 
 def missing_dependencies() -> list[str]:
     """Пакеты RAG, которых нет в окружении (проверка без импорта)."""
     return [name for name in REQUIRED_PACKAGES if importlib.util.find_spec(name) is None]
+
+
+# Ошибка предзагрузки torch: если она есть, RAG в этом процессе не заработает.
+_preload_error = None
 
 
 def preload_dependencies() -> bool:
@@ -24,11 +32,13 @@ def preload_dependencies() -> bool:
     импорт torch падает с WinError 1114 (c10.dll). Поэтому GUI вызывает это
     до импорта PyQt5. Стоит ~1 с, остальные зависимости остаются ленивыми.
     """
+    global _preload_error
     if missing_dependencies():
         return False
     try:
         import torch  # noqa: F401
     except Exception as e:
+        _preload_error = f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
         print(f"[RAG] Не удалось предзагрузить torch: {type(e).__name__}: {e}")
         return False
     return True
@@ -58,10 +68,18 @@ class RagManager:
         self._ready = False
         self._indexed_chunks = 0
 
+    def unavailable_reason(self) -> str | None:
+        """Почему RAG недоступен, или None если всё в порядке."""
+        if self.missing_dependencies:
+            return "не установлены пакеты: " + ", ".join(self.missing_dependencies)
+        if _preload_error:
+            return f"torch не загрузился — {_preload_error}"
+        return None
+
     @property
     def available(self) -> bool:
-        """Установлены ли зависимости RAG."""
-        return not self.missing_dependencies
+        """Можно ли пользоваться RAG."""
+        return self.unavailable_reason() is None
 
     def _ensure_ready(self) -> bool:
         """Ленивая инициализация при первом обращении."""
@@ -148,8 +166,8 @@ class RagManager:
             start += step
         return chunks
 
-    def search(self, query, top_k=3):
-        """Релевантные фрагменты; пустой список — если RAG недоступен."""
+    def search_with_scores(self, query, top_k=3):
+        """Список (фрагмент, distance); пустой — если RAG недоступен."""
         query = (query or "").strip()
         if not query:
             return []
@@ -164,6 +182,12 @@ class RagManager:
         results = self._collection.query(
             query_embeddings=query_embedding,
             n_results=min(top_k, total),
+            include=["documents", "distances"],
         )
-        documents = results.get("documents") or []
-        return list(documents[0]) if documents else []
+        documents = (results.get("documents") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+        return list(zip(documents, distances))
+
+    def search(self, query, top_k=3):
+        """Релевантные фрагменты; пустой список — если RAG недоступен."""
+        return [document for document, _ in self.search_with_scores(query, top_k)]

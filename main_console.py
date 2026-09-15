@@ -6,6 +6,8 @@ from core.tool_manager import ToolManager
 
 EXIT_COMMANDS = {"выход", "exit", "quit"}
 CLEAR_COMMANDS = {"забудь всё", "забудь все", "очисти", "clear"}
+RAG_ON_COMMANDS = {"раг вкл", "поиск вкл", "rag on"}
+RAG_OFF_COMMANDS = {"раг выкл", "поиск выкл", "rag off"}
 
 
 def main():
@@ -20,8 +22,9 @@ def main():
         print(f"[RAG] Недоступен: нет пакетов {', '.join(rag.missing_dependencies)}. "
               "Работаю как обычный чат.")
 
-    print("Чат запущен. Команды: 'выход', 'забудь всё'. Ctrl+C — выход.")
+    print("Чат запущен. Команды: 'выход', 'забудь всё', 'раг вкл' / 'раг выкл'.")
 
+    force_rag = False
     while True:
         try:
             user_input = input("Ты: ").strip()
@@ -39,9 +42,17 @@ def main():
             history.clear()
             print("История очищена.")
             continue
+        if command in RAG_ON_COMMANDS:
+            force_rag = True
+            print("Поиск по базе знаний включён.")
+            continue
+        if command in RAG_OFF_COMMANDS:
+            force_rag = False
+            print("Поиск по базе знаний выключен: решает модель.")
+            continue
 
         try:
-            result = engine.send(user_input)
+            result = engine.send(user_input, force_rag=force_rag)
         except LmClientError as e:
             print(f"Ошибка: {e}")
             history.force_save()
@@ -52,6 +63,8 @@ def main():
 
         marker = " [RAG]" if result.used_rag else ""
         print(f"Ассистент{marker}: {result.answer}")
+        if force_rag and not result.used_rag:
+            print("  (в базе знаний ничего подходящего не найдено)")
 
     history.force_save()
     print("Пока!")
