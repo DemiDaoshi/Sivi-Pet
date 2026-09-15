@@ -1,27 +1,61 @@
-# main_console.py
-from core.lm_client import LmClient
+from core.chat_engine import ChatEngine
 from core.history_manager import HistoryManager
+from core.lm_client import LmClient, LmClientError
+from core.rag_manager import RagManager
+from core.tool_manager import ToolManager
 
-client = LmClient()
-history = HistoryManager()
-
-print("Чат запущен. 'выход' для завершения.")
-while True:
-    user_input = input("Ты: ")
-    if user_input.lower() == "выход":
-        history.force_save()
-        print("Пока!")
-        break
-    if user_input.lower() == "забудь всё":
-        history.clear()
-        print("История очищена.")
-        continue
+EXIT_COMMANDS = {"выход", "exit", "quit"}
+CLEAR_COMMANDS = {"забудь всё", "забудь все", "очисти", "clear"}
 
 
-    history.add_message("user", user_input)
-    try:
-        answer = client.send_message(history.messages)
-        print(f"Ассистент: {answer}")
-        history.add_message("assistant", answer)
-    except ConnectionError as e:
-        print(f"Ошибка: {e}")
+def main():
+    client = LmClient()
+    history = HistoryManager()
+    rag = RagManager()
+    engine = ChatEngine(client, history, ToolManager(rag))
+
+    if rag.available:
+        print("[RAG] База знаний готова (индексация при первом обращении к ней).")
+    else:
+        print(f"[RAG] Недоступен: нет пакетов {', '.join(rag.missing_dependencies)}. "
+              "Работаю как обычный чат.")
+
+    print("Чат запущен. Команды: 'выход', 'забудь всё'. Ctrl+C — выход.")
+
+    while True:
+        try:
+            user_input = input("Ты: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not user_input:
+            continue
+
+        command = user_input.lower()
+        if command in EXIT_COMMANDS:
+            break
+        if command in CLEAR_COMMANDS:
+            history.clear()
+            print("История очищена.")
+            continue
+
+        try:
+            result = engine.send(user_input)
+        except LmClientError as e:
+            print(f"Ошибка: {e}")
+            history.force_save()
+            continue
+        except KeyboardInterrupt:
+            print("\nПрервано.")
+            break
+
+        marker = " [RAG]" if result.used_rag else ""
+        print(f"Ассистент{marker}: {result.answer}")
+
+    history.force_save()
+    print("Пока!")
+
+
+if __name__ == "__main__":
+    main()

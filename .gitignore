@@ -13,3 +13,12 @@ __pycache__/
 # Секреты
 *.key
 *.env
+
+# Источники истории (у каждого профиля свой файл)
+history.json
+history_*.json
+*.tmp
+
+# База знаний RAG: свои .md кладём в data/, в git они не хранятся
+data/*
+!data/.gitkeep
