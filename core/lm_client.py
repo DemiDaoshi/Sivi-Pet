@@ -14,7 +14,7 @@ class LmClientError(Exception):
 
 class LmClient:
     def __init__(self, base_url=DEFAULT_BASE_URL, model=None,
-                 temperature=0.7, max_tokens=DEFAULT_MAX_TOKENS, timeout=DEFAULT_TIMEOUT):
+                 temperature=0.65, max_tokens=DEFAULT_MAX_TOKENS, timeout=DEFAULT_TIMEOUT):
         self.url = base_url
         self.model = model
         self.temperature = temperature
