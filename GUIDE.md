@@ -1826,7 +1826,8 @@ if __name__ == "__main__":
 
 `expected_sources` и есть эталон для поиска: по именам файлов считаются
 retrieval-метрики. `reference_answer` и `key_facts` нужны судье, чтобы понять,
-совпал ли ответ по смыслу. `draft: true` помечает ещё не вычитанные записи.
+совпал ли ответ по смыслу. Поля `key_facts` и `note` необязательные, а пометку
+`draft: true` ставит только генератор черновиков: в вычитанном наборе её нет.
 
 #### Код 2. Метрики поиска
 
@@ -2248,7 +2249,7 @@ sequenceDiagram
 | Температура судьи | `eval/judge.py`, `JUDGE_TEMPERATURE` | `0.0` |
 | Лимит токенов судьи | `eval/judge.py`, `JUDGE_MAX_TOKENS` | `1024` |
 | Сколько фрагментов в eval | `eval/run_eval.py --top-k` | `3` |
-| Вопросы для проверки | `eval/golden_set.json` | 26 записей |
+| Вопросы для проверки | `eval/golden_set.json` | 27 записей |
 | Черновики вопросов | `eval/make_drafts.py --per-file`, `--negatives` | `2` / `0` |
 | Отчёты прогона | `eval/results/` | `report_*.md`, `report_*.json` |
 
