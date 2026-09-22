@@ -3,7 +3,8 @@
 Этот текст подробно объясняет, как устроен Sivi. Что делает каждый файл, из каких
 частей он состоит и как эти части работают вместе. Он рассчитан на человека,
 который немного знает Python и хочет разобраться, как сделать чат с языковой
-моделью, историю диалога и поиск по своим заметкам (RAG).
+моделью, историю диалога, поиск по своим заметкам (RAG) и проверку качества
+ответов.
 
 `README.md` это короткое описание: что это и как запустить. А здесь речь о том,
 как всё работает внутри и как это написано кодом.
@@ -26,8 +27,8 @@
 объясняю, зачем он нужен, какую проблему решает и какой синтаксис в нём
 используется. Удобно открыть файлы проекта рядом и сверяться.
 
-Раздел 9 это шпаргалка по настройкам, раздел 10 про то, что в проекте осознанно
-не сделано.
+Раздел 6.9 рассказывает про `eval/`: golden set, метрики поиска и судью. Раздел 9
+это шпаргалка по настройкам, раздел 10 про то, что в проекте осознанно не сделано.
 
 ---
 
@@ -40,11 +41,14 @@ Sivi это учебный чат-ассистент на Python. Он умее�
 - держать несколько профилей с разными системными промптами и своей историей у
   каждого;
 - искать ответ в личных `.md`-заметках (это и есть RAG) двумя способами;
-- работать и в консоли, и в окне на PyQt5, причём логика у них общая.
+- работать и в консоли, и в окне на PyQt5, причём логика у них общая;
+- проверять качество ответов: офлайн-метрики поиска по golden set и оценка судьёй
+  (та же модель, но в отдельном контексте).
 
 Главная идея архитектуры такая: вся логика диалога живёт в `core/`, а консоль и
 окно это только пульты управления. Поэтому поведение в обоих режимах одинаковое
-и его не приходится писать дважды.
+и его не приходится писать дважды. Проверки качества вынесены в отдельную папку
+`eval/`: они пользуются теми же сервисами `core/`, но в обычном чате не участвуют.
 
 ---
 
@@ -64,6 +68,10 @@ Sivi это учебный чат-ассистент на Python. Он умее�
 | **ChromaDB** | Векторная база: хранит эмбеддинги и умеет искать ближайшие. Здесь живёт в памяти. |
 | **reasoning-модель** | Модель, которая сначала думает (`reasoning_content`), а потом отвечает. Тратит много токенов. |
 | **Маркер `[RAG: ...]`** | Текстовый сигнал от модели: «мне нужен контекст». Sivi его распознаёт. |
+| **Golden set** | Фиксированный набор вопросов с эталонами и ожидаемыми источниками. По нему прогоняют проверки качества. |
+| **Retrieval-метрика** | Число о качестве поиска (нашёлся ли нужный файл, на каком месте). Считается без модели. |
+| **LLM-as-judge** | Приём, когда качество ответа оценивает другая (или та же, но отдельная) модель по рубрике. |
+| **Groundedness** | Опора ответа на найденный контекст. Если факты не подтверждаются фрагментами, ответ «не обоснован». |
 
 ---
 
@@ -77,11 +85,18 @@ Sivi/
 │   ├── rag_manager.py        чтение data/*.md, эмбеддинги, поиск по ChromaDB
 │   ├── tool_manager.py       распознавание маркера [RAG: ...] и сборка контекста
 │   └── chat_engine.py        один ход диалога, общий для консоли и окна
+├── eval/                     проверка качества ответов и поиска
+│   ├── golden_set.json       вопросы, эталоны и ожидаемые источники
+│   ├── metrics.py            метрики поиска, чистые функции без модели
+│   ├── judge.py              судья: отдельный контекст и разбор вердикта
+│   ├── run_eval.py           прогон golden set, отчёты в eval/results/
+│   ├── make_drafts.py        генератор черновиков вопросов по заметкам
+│   └── results/              отчёты прогонов (в git не хранятся)
 ├── gui/
 │   └── chat_window.py        окно на PyQt5
 ├── main_console.py           чат в консоли
 ├── test.py                   офлайн-проверки логики (+ опционально живой запрос)
-├── data/                     сюда кладутся личные заметки .md (в git не хранятся)
+├── data/                     заметки .md для RAG (демо-набор лежит в git)
 ├── profiles.json             системные промпты профилей
 ├── history.json              история профиля default (в git не хранится)
 ├── requirements.txt          зависимости
@@ -95,7 +110,7 @@ Sivi/
 | Точки входа | `main_console.py`, `gui/chat_window.py` | Принимают ввод, показывают ответ, обрабатывают команды и кнопки. |
 | Оркестрация | `core/chat_engine.py` | Решает, в каком порядке звать остальных. |
 | Сервисы | `core/lm_client.py`, `core/history_manager.py`, `core/rag_manager.py`, `core/tool_manager.py` | Каждый умеет одну вещь и не управляет диалогом. |
-| Проверки | `test.py` | Прогоняет логику на заглушках, модель для этого не нужна. |
+| Проверки | `test.py`, `eval/` | `test.py` гоняет логику на заглушках, `eval/` измеряет качество поиска и ответов по golden set. |
 
 ---
 
@@ -119,6 +134,12 @@ flowchart TB
     Docs[("data/*.md")]
     Chroma[("ChromaDB<br/>в памяти")]
 
+    subgraph Checks["Проверки качества (eval/)"]
+        RunEval["run_eval.py<br/>прогон golden set"]
+        Judge["judge.py<br/>судья, отдельный контекст"]
+        Metrics["metrics.py<br/>метрики поиска"]
+    end
+
     CLI --> Engine
     GUI --> Engine
     Engine --> Client
@@ -129,6 +150,12 @@ flowchart TB
     History --> Files
     Rag --> Docs
     Rag --> Chroma
+    RunEval --> Engine
+    RunEval --> Rag
+    RunEval --> Judge
+    RunEval --> Metrics
+    Judge --> Client
+    GUI --> Judge
 ```
 
 Если словами: и консоль, и окно передают сообщение пользователя в `ChatEngine`.
@@ -136,6 +163,11 @@ flowchart TB
 всегда отправляет диалог в `LmClient`, который по HTTP общается с LM Studio.
 История складывается в `HistoryManager` и уезжает в JSON-файлы. `ToolManager` при
 необходимости дёргает `RagManager`, а тот читает заметки и ищет по векторам.
+
+Отдельная ветка `eval/` не участвует в обычном диалоге. `run_eval.py` берёт вопросы
+из golden set, гоняет их через тот же `ChatEngine` и `RagManager`, считает метрики
+поиска и зовёт `Judge`. Судья ходит в тот же `LmClient`, но со своим контекстом.
+А `gui/chat_window.py` по кнопке «Оценить» может позвать судью для последнего ответа.
 
 > Диаграммы написаны на Mermaid. Их понимают GitHub, GitLab и VS Code с
 > расширением Markdown Preview Mermaid. В обычном просмотрщике будет виден
@@ -168,16 +200,28 @@ python main_console.py      # консоль
 python gui/chat_window.py   # окно
 ```
 
-Для поиска положи свои `.md`-файлы в `data/`. В git эта папка пустая, потому что
-там лежали личные документы. Так что в свежем клоне поиск ничего не найдёт, пока
-туда что-нибудь не положить.
+Для поиска положи свои `.md`-файлы в `data/`. В репозитории лежит демо-набор
+заметок про LLM, и он же служит основой для проверок в `eval/`. Личные заметки
+по умолчанию в git не попадают: папка `data/` игнорируется, а демо-файлы
+разрешены явными строками в `.gitignore`.
 
-Проверки:
+Проверки логики:
 
 ```bash
 python test.py            # офлайн, модель не нужна
 python test.py --live     # плюс один реальный запрос к LM Studio
 ```
+
+Проверки качества (нужен RAG и запущенная модель):
+
+```bash
+python eval/run_eval.py --model qwen/qwen3.5-9b
+python eval/run_eval.py --no-judge      # только метрики поиска
+python eval/make_drafts.py              # черновики вопросов по заметкам
+```
+
+Если в LM Studio загружено несколько моделей, `--model` обязателен: без него
+сервер вернёт ошибку 400. С одной загруженной моделью можно не указывать.
 
 ---
 
@@ -577,7 +621,10 @@ def add_message(self, role: str, content: str):
 | `MAX_RELEVANT_DISTANCE` | `0.34`, порог релевантности |
 | `missing_dependencies()` | Проверяет наличие пакетов без импорта, через `importlib.util.find_spec` |
 | `preload_dependencies()` | Заранее грузит `torch`, это важно для Windows и Qt |
+| `RetrievedChunk` | Именованный кортеж: `text`, `source`, `distance` — один найденный фрагмент |
 | `RagManager` | Индексация и поиск |
+| `search_with_meta(query, top_k)` | Возвращает `RetrievedChunk` с источником и distance |
+| `search_with_scores` / `search` | Упрощённые обёртки: пары `(текст, distance)` и просто тексты |
 
 #### Код 1. Проверка зависимостей без импорта
 
@@ -788,8 +835,14 @@ def _split_text(self, text):
 #### Код 6. Поиск и хитрое извлечение результатов
 
 ```python
-def search_with_scores(self, query, top_k=3):
-    """Список (фрагмент, distance); пустой — если RAG недоступен."""
+class RetrievedChunk(NamedTuple):
+    text: str
+    source: str
+    distance: float | None = None
+
+
+def search_with_meta(self, query, top_k=3) -> list[RetrievedChunk]:
+    """Найденные фрагменты с источником и distance; пустой список — если RAG недоступен."""
     query = (query or "").strip()
     if not query:
         return []
@@ -804,11 +857,29 @@ def search_with_scores(self, query, top_k=3):
     results = self._collection.query(
         query_embeddings=query_embedding,
         n_results=min(top_k, total),
-        include=["documents", "distances"],
+        include=["documents", "distances", "metadatas"],
     )
     documents = (results.get("documents") or [[]])[0]
     distances = (results.get("distances") or [[]])[0]
-    return list(zip(documents, distances))
+    metadatas = (results.get("metadatas") or [[]])[0]
+
+    chunks = []
+    for index, document in enumerate(documents):
+        distance = distances[index] if index < len(distances) else None
+        metadata = metadatas[index] if index < len(metadatas) else {}
+        source = (metadata or {}).get("source", "")
+        chunks.append(RetrievedChunk(document, source, distance))
+    return chunks
+
+
+def search_with_scores(self, query, top_k=3):
+    """Список (фрагмент, distance); пустой — если RAG недоступен."""
+    return [(chunk.text, chunk.distance) for chunk in self.search_with_meta(query, top_k)]
+
+
+def search(self, query, top_k=3):
+    """Релевантные фрагменты; пустой список — если RAG недоступен."""
+    return [chunk.text for chunk in self.search_with_meta(query, top_k)]
 ```
 
 Эта функция превращает текстовый запрос в вектор и находит ближайшие куски
@@ -828,21 +899,38 @@ ChromaDB. Параметр `n_results=min(top_k, total)` нужен, потом�
 ChromaDB принимает список запросов и возвращает список списков. Мы отправили один
 запрос, поэтому берём нулевой элемент `[0]`. Часть `or [[]]` это защита: если
 `documents` равен `None`, получим `[[]]`, а `[0]` вернёт пустой список без ошибки.
-В конце `zip(documents, distances)` соединяет два списка попарно: первый текст с
-первой дистанцией и так далее, а `list(...)` материализует результат в список
-кортежей.
+То же самое делается для `distances` и `metadatas`: метаданные нужны, чтобы
+сохранить имя файла-источника рядом с фрагментом.
 
-Метод `search()` это упрощённая обёртка, которая возвращает только тексты
-фрагментов. Порог `MAX_RELEVANT_DISTANCE = 0.34` применяется выше, в
-`ToolManager`. Порог я подбирал вручную: свои темы давали расстояние около
-0.26-0.32, а посторонние 0.36 и выше.
+Дальше цикл `for index, document in enumerate(documents)` собирает список
+`RetrievedChunk`. Обрати внимание на защитные строки
+`distance = distances[index] if index < len(distances) else None`. ChromaDB обычно
+возвращает согласованные списки, но проверка на длину не даёт упасть, если ответ
+придёт короче. Метаданные `(metadata or {}).get("source", "")` тоже терпимы к
+пустому словарю: если источника нет, будет пустая строка.
+
+Зачем вообще понадобился отдельный метод. Простым `search_with_scores` и `search`
+пользовались старые вызовы, и они оставлены как тонкие обёртки над
+`search_with_meta`, чтобы не менять их сигнатуры. Внутри обёрток списочное
+включение снова разбирает `RetrievedChunk` на части. Так у поиска одна реализация,
+а лишних вариантов нет.
+
+Почему в `RetrievedChunk` едет и `source`, и `distance`: по ним `eval/` считает
+retrieval-метрики (нашёлся ли нужный файл и на каком месте), а судья видит, из
+какой заметки пришёл каждый фрагмент. В обычном чате эти поля просто не
+показываются.
+
+Порог `MAX_RELEVANT_DISTANCE = 0.34` применяется выше, в `ToolManager`. Порог я
+подбирал вручную: свои темы давали расстояние около 0.26-0.32, а посторонние 0.36
+и выше. Прогон `eval/run_eval.py` помогает перепроверить эту калибровку: в отчёте
+видно среднее расстояние для вопросов с ответом и для посторонних.
 
 Ещё пара замечаний. Хранилище живёт в памяти (`chromadb.Client()`), поэтому при
 каждом запуске индекс собирается заново. Это сознательный компромисс ради
 простоты. И префиксы `passage: ` / `query: ` это требование модели e5, а не
 украшение.
 
-С этим модулем связан `ToolManager`, который вызывает `search_with_scores` и
+С этим модулем связан `ToolManager`, который вызывает `search_with_meta` и
 читает `available` с `unavailable_reason`. А GUI дополнительно зовёт
 `preload_dependencies()` до импорта PyQt5.
 
@@ -857,21 +945,37 @@ ChromaDB принимает список запросов и возвращае�
 | Сущность | Смысл |
 | --- | --- |
 | `RAG_PATTERN` | Регулярное выражение для `[RAG: запрос]`, регистр и пробелы не важны |
+| `ToolResult` | Именованный кортеж: `text` для модели и `chunks` — найденные `RetrievedChunk` |
 | `ToolManager` | Обёртка над `RagManager` |
 | `extract_query(answer)` | Вернёт запрос из маркера или `None` |
 | `strip_marker(text)` | Уберёт служебные маркеры из ответа |
-| `context_for(query)` | Принудительный поиск, вернёт пару `(контекст, число фрагментов)` |
-| `handle(answer)` | Распознать запрос модели и вернуть текст результата или `None` |
+| `context_for(query)` | Принудительный поиск, вернёт пару `(контекст, список фрагментов)` |
+| `handle(answer)` | Распознать запрос модели и вернуть `ToolResult` или `None` |
 
 #### Код 1. Регулярное выражение для маркера
 
 ```python
 import re
+from typing import NamedTuple
 
-from core.rag_manager import MAX_RELEVANT_DISTANCE
+from core.rag_manager import MAX_RELEVANT_DISTANCE, RetrievedChunk
+
+
+class ToolResult(NamedTuple):
+    text: str
+    chunks: tuple[RetrievedChunk, ...] = ()
+
 
 RAG_PATTERN = re.compile(r"\[\s*RAG\s*:\s*(?P<query>.+?)\s*\]", re.IGNORECASE | re.DOTALL)
 ```
+
+`ToolResult` появился потому, что инструменту мало вернуть текст для модели. Наверх
+нужно отдать ещё и сами фрагменты: `ChatEngine` кладёт их в `ChatResult.sources`, а
+оттуда их читают GUI и судья. Раньше метод возвращал просто строку, и наружу
+уходило только число фрагментов. Поле `chunks` имеет тип
+`tuple[RetrievedChunk, ...]` — кортеж, потому что результат не должен меняться
+после возврата, а значение по умолчанию `()` покрывает случаи «ничего не нашлось» и
+«RAG недоступен».
 
 Модель отвечает текстом, и нужно выловить из него маркер вида
 `[RAG: что такое MCP]`. Регулярное выражение (regexp) это стандартный инструмент
@@ -932,70 +1036,78 @@ def strip_marker(self, text: str) -> str:
 #### Код 3. Сборка контекста
 
 ```python
-def context_for(self, query: str) -> tuple[str | None, int]:
-    """Ищет по базе принудительно. Возвращает (текст контекста, число фрагментов)."""
+def context_for(self, query: str) -> tuple[str | None, list[RetrievedChunk]]:
+    """Ищет по базе принудительно. Возвращает (текст контекста, найденные фрагменты)."""
     if not self.rag.available:
-        return None, 0
+        return None, []
 
-    found = [document for document, distance
-             in self.rag.search_with_scores(query, top_k=self.top_k)
-             if distance <= self.max_distance]
+    found = [chunk for chunk in self.rag.search_with_meta(query, top_k=self.top_k)
+             if chunk.distance is not None and chunk.distance <= self.max_distance]
     if not found:
-        return None, 0
+        return None, []
 
     formatted = "\n\n".join(
-        f"--- Фрагмент {i + 1} ---\n{chunk}" for i, chunk in enumerate(found)
+        f"--- Фрагмент {i + 1} ---\n{chunk.text}" for i, chunk in enumerate(found)
     )
     return (f"Контекст из базы знаний по запросу «{query}»:\n\n{formatted}\n\n"
-            "Ответь пользователю, опираясь на этот контекст."), len(found)
+            "Ответь пользователю, опираясь на этот контекст."), found
 ```
 
 Это «поиск плюс фильтр плюс форматирование»: получаем фрагменты, отбрасываем
 нерелевантные и собираем из них один текст, готовый для модели.
 
-Строка `if not self.rag.available: return None, 0` это ранний выход, если поиск
-недоступен. В списочном включении `for document, distance in ...` работает
-распаковка кортежа: каждый элемент это пара, и Python сразу разбирает её на две
-переменные. Условие `if distance <= self.max_distance` это фильтр по порогу, всё
-что дальше в контекст не попадает.
+Строка `if not self.rag.available: return None, []` это ранний выход, если поиск
+недоступен. В списочном включении виден уже знакомый срез: вместо пары
+`(текст, distance)` теперь едут полноценные `RetrievedChunk`, поэтому фильтр
+читает `chunk.distance`. Проверка `chunk.distance is not None` защищает от
+сравнения `None` с числом. Условие `chunk.distance <= self.max_distance` это порог,
+всё что дальше в контекст не попадает.
 
 Вызов `"\n\n".join(генератор)` склеивает элементы через пустую строку, а внутри
 генераторное выражение с f-строкой. Функция `enumerate(found)` даёт пару (индекс,
-значение), и `i + 1` нумерует фрагменты с единицы, как принято у людей. Функция
-возвращает кортеж `(текст, число)`, то есть сразу два значения, а вызывающий
-распаковывает его: `context, found = ...`. В текст добавляется инструкция «Ответь,
-опираясь на этот контекст»: она уходит модели как сообщение пользователя и
+значение), и `i + 1` нумерует фрагменты с единицы, как принято у людей. Обрати
+внимание, что сюда попадает только `chunk.text`: модели источник не нужен, а вот
+`ChatEngine` получит список объектов целиком. В текст добавляется инструкция
+«Ответь, опираясь на этот контекст»: она уходит модели как сообщение пользователя и
 подсказывает, как использовать данные.
 
 #### Код 4. Обработка «модель запросила инструмент»
 
 ```python
-def handle(self, answer: str) -> str | None:
-    """Инструмент, запрошенный моделью. Возвращает текст или None."""
+def handle(self, answer: str) -> ToolResult | None:
+    """Инструмент, запрошенный моделью. Возвращает ToolResult или None."""
     query = self.extract_query(answer)
     if query is None:
         return None
 
     if not self.rag.available:
-        return (f"Контекст из базы знаний недоступен ({self.rag.unavailable_reason()}). "
-                "Ответь пользователю, опираясь только на свои знания.")
+        return ToolResult(
+            f"Контекст из базы знаний недоступен ({self.rag.unavailable_reason()}). "
+            "Ответь пользователю, опираясь только на свои знания."
+        )
 
-    context, found = self.context_for(query)
-    if not found:
-        return (f"В базе знаний ничего не найдено по запросу «{query}». "
-                "Ответь пользователю, опираясь только на свои знания.")
-    return context
+    context, chunks = self.context_for(query)
+    if not chunks:
+        return ToolResult(
+            f"В базе знаний ничего не найдено по запросу «{query}». "
+            "Ответь пользователю, опираясь только на свои знания."
+        )
+    return ToolResult(context, tuple(chunks))
 ```
 
-Это дерево решений для случая, когда модель попросила контекст. Ключевая идея:
-метод возвращает текст для следующего запроса, а не сами данные. `ChatEngine`
-просто вставит этот текст в диалог.
+Это дерево решений для случая, когда модель попросила контекст. Ключевая идея
+осталась прежней: метод возвращает текст для следующего запроса, а не пишет в
+историю. Но теперь этот текст завёрнут в `ToolResult` вместе с найденными
+фрагментами, и `ChatEngine` может положить их в `ChatResult.sources`.
 
 Сначала проверяем маркер: если его нет, возвращаем `None`. Именно `None`
 сигнализирует движку «обычный ответ, ничего делать не надо». Если RAG недоступен
-или ничего не нашлось, возвращается тоже текст, но не контекст, а инструкция
-«отвечай своими знаниями». Так модель всегда получает второй шанс ответить, и
-диалог не обрывается.
+или ничего не нашлось, возвращается `ToolResult` с текстом, но без фрагментов
+(`chunks` по умолчанию пустой), и внутри инструкция «отвечай своими знаниями». Так
+модель всегда получает второй шанс ответить, и диалог не обрывается.
+
+Строка `return ToolResult(context, tuple(chunks))` превращает список в кортеж:
+тип поля объявлен как кортеж, и менять результат снаружи уже не получится.
 
 Ещё замечу, что порог релевантности работает в обоих режимах, поэтому мусорные
 фрагменты не утекают в промпт.
@@ -1012,7 +1124,7 @@ def handle(self, answer: str) -> str | None:
 
 | Сущность | Смысл |
 | --- | --- |
-| `ChatResult` | Именованный кортеж: `answer`, `used_rag`, `fragments` (по умолчанию 0) |
+| `ChatResult` | Именованный кортеж: `answer`, `used_rag`, `fragments`, `sources` |
 | `ChatEngine` | Хранит `client`, `history`, `tools` |
 | `ChatEngine.send(user_text, force_rag)` | Главный метод: один ход, возвращает `ChatResult` |
 
@@ -1026,10 +1138,11 @@ class ChatResult(NamedTuple):
     answer: str
     used_rag: bool
     fragments: int = 0
+    sources: tuple = ()
 ```
 
-Из `send` нужно вернуть сразу три вещи: текст ответа, был ли задействован RAG и
-сколько фрагментов нашлось.
+Из `send` нужно вернуть сразу несколько вещей: текст ответа, был ли задействован
+RAG, сколько фрагментов нашлось и сами найденные фрагменты.
 
 `NamedTuple` это кортеж с именованными полями. Его можно использовать и как
 обычный кортеж, и по именам:
@@ -1037,11 +1150,15 @@ class ChatResult(NamedTuple):
 ```python
 result.answer          # по имени
 result.used_rag
-answer, used, count = result   # распаковка, как из обычного кортежа
+result.sources         # кортеж RetrievedChunk с полями text, source, distance
+answer, used, count, chunks = result   # распаковка, как из обычного кортежа
 ```
 
-Поля читаемы, объект лёгкий и неизменяемый. Запись `fragments: int = 0` задаёт
-значение по умолчанию: если его не указать, будет ноль.
+Поля читаемы, объект лёгкий и неизменяемый. Запись `fragments: int = 0` и
+`sources: tuple = ()` задают значения по умолчанию: если их не указать, будут ноль
+и пустой кортеж. Поле `sources` появилось ради проверок: GUI и судья должны видеть
+ровно те фрагменты, на которые опирался ответ, а не искать их заново. В обычном
+чате оно просто не используется.
 
 #### Код 2. Главный метод send
 
@@ -1058,19 +1175,19 @@ def send(self, user_text: str, force_rag: bool = False) -> ChatResult:
     answer = self.client.send_message(self.history.messages)
 
     # Проверяем, не запросила ли модель инструмент.
-    tool_result = self.tools.handle(answer)
-    if tool_result is None:
+    tool = self.tools.handle(answer)
+    if tool is None:
         self.history.add_message("assistant", answer)
         return ChatResult(answer, used_rag=False)
 
     # Контекст уходит ролью user: system в середине диалога даёт 400.
     request_messages = self.history.messages + [
         {"role": "assistant", "content": answer},
-        {"role": "user", "content": tool_result},
+        {"role": "user", "content": tool.text},
     ]
     answer = self.tools.strip_marker(self.client.send_message(request_messages))
     self.history.add_message("assistant", answer)
-    return ChatResult(answer, used_rag=True)
+    return ChatResult(answer, used_rag=True, fragments=len(tool.chunks), sources=tool.chunks)
 ```
 
 Это сердце проекта: вся логика одного хода собрана в одном методе. Разберём
@@ -1079,13 +1196,13 @@ def send(self, user_text: str, force_rag: bool = False) -> ChatResult:
 Сначала `self.history.add_message("user", user_text)` сохраняет сообщение
 пользователя, чтобы оно попало в запрос ниже. Список `history` меняется на месте.
 Дальше блок `if force_rag:` отвечает за принудительный режим. Строка
-`context, found = ...` распаковывает кортеж. Если что-то нашлось (`found` истинно),
-сразу уходим в `_answer_with_context` и делаем один запрос вместо двух. Затем
-`self.client.send_message(self.history.messages)` отправляет обычный запрос со всей
-историей, а `tool_result = self.tools.handle(answer)` спрашивает, не запросил ли
-инструмент модель.
+`context, found = ...` распаковывает кортеж. Если что-то нашлось (список `found`
+непустой), сразу уходим в `_answer_with_context` и делаем один запрос вместо двух.
+Затем `self.client.send_message(self.history.messages)` отправляет обычный запрос со
+всей историей, а `tool = self.tools.handle(answer)` спрашивает, не запросил ли
+инструмент модель. В `tool` лежит либо `None`, либо `ToolResult`.
 
-Проверка `if tool_result is None:` означает обычный ответ. Сравнение `is None` (а
+Проверка `if tool is None:` означает обычный ответ. Сравнение `is None` (а
 не `== None`) это правильный способ проверки на «ничего»: `None` в программе один.
 
 Самое важное место, это сборка второго запроса:
@@ -1093,7 +1210,7 @@ def send(self, user_text: str, force_rag: bool = False) -> ChatResult:
 ```python
 request_messages = self.history.messages + [
     {"role": "assistant", "content": answer},
-    {"role": "user", "content": tool_result},
+    {"role": "user", "content": tool.text},
 ]
 ```
 
@@ -1112,30 +1229,38 @@ request_messages = self.history.messages + [
 
 И про переиспользование имени `answer`. Сначала в нём лежит ответ с маркером,
 потом туда же записывается финальный ответ. Так короче, но важно не запутаться: к
-моменту `add_message` там уже чистый финальный текст.
+моменту `add_message` там уже чистый финальный текст. А в возвращаемом
+`ChatResult` едут ещё и фрагменты из `tool.chunks`: благодаря этому снаружи видно,
+на что именно опирался ответ.
 
 #### Код 3. Ветка принудительного поиска
 
 ```python
-def _answer_with_context(self, context: str, found: int) -> ChatResult:
+def _answer_with_context(self, context: str, found: list) -> ChatResult:
     request_messages = self.history.messages + [{"role": "user", "content": context}]
     answer = self.tools.strip_marker(self.client.send_message(request_messages))
     self.history.add_message("assistant", answer)
-    return ChatResult(answer, used_rag=True, fragments=found)
+    return ChatResult(answer, used_rag=True, fragments=len(found), sources=tuple(found))
 ```
 
-Это отдельный короткий путь для принудительного RAG: в историю добавляется
+Это отдельный короткий путь для принудительного RAG: к истории добавляется
 сообщение с готовым контекстом, и модель отвечает один раз.
 
 Здесь к истории добавляется один элемент, а не два, потому что маркера нет: модель
-не просила поиск, его сделал `ToolManager` заранее. Возвращаем `fragments=found`,
-поэтому в принудительном режиме интерфейс знает точное число фрагментов.
+не просила поиск, его сделал `ToolManager` заранее. Аргумент `found` это уже список
+`RetrievedChunk`, поэтому `fragments=len(found)` даёт число фрагментов, а
+`sources=tuple(found)` кладёт сами фрагменты в результат. Список превращается в
+кортеж по той же причине, что и в `ToolResult`: результат не должен меняться
+снаружи.
 
-Отдельно про флаг `used_rag`: он значит «инструмент был задействован». При поиске
-по инициативе модели `fragments` остаётся нулём, потому что `handle` возвращает
-только текст. Поэтому в GUI возможен статус «Использован RAG» даже когда
-релевантных фрагментов не нашлось. А в принудительном режиме число фрагментов
-известно точно.
+Отдельно про флаг `used_rag`: он значит «инструмент был задействован», а не
+«фрагменты нашлись». Если модель попросила поиск маркером, но порог отсеял всё, то
+`handle` вернёт `ToolResult` с одним текстом-инструкцией, и движок всё равно сделает
+второй запрос. Здесь `used_rag=True` при `fragments=0` и пустых `sources`. А вот в
+принудительном режиме при пустом поиске движок уходит в обычную ветку с
+`used_rag=False`. Раньше в режиме модели `fragments` всегда был нулём, потому что
+`handle` возвращал только текст. Теперь `ToolResult` несёт и фрагменты, поэтому
+число и источники известны в обоих режимах, и GUI показывает «RAG: N фрагм.».
 
 Этот модуль получает `LmClient`, `HistoryManager` и `ToolManager`, а возвращает
 `ChatResult` точкам входа.
@@ -1250,13 +1375,18 @@ Ctrl+Z или Ctrl+D), а `KeyboardInterrupt` это Ctrl+C. Оба случая
 | Сущность | Смысл |
 | --- | --- |
 | `COLOR_IDLE` / `COLOR_BUSY` / `COLOR_ERROR` | Цвета индикатора состояния |
+| `VERDICT_BG` / `VERDICT_FG` | Фон и текст блока судьи: зелёный / жёлтый / красный |
+| `verdict_tone(verdict)` | Превращает оценку судьи в `good` / `mid` / `bad` |
 | `RequestThread` | `QThread`, который выполняет один ход в фоне |
+| `JudgeThread` | `QThread` для запроса судьи |
 | `ChatWindow` | Само окно |
 | Сигналы `responded` / `failed` | Ответ и ошибка из потока в UI |
+| Сигналы `judged` / `failed` у `JudgeThread` | Вердикт и ошибка судьи |
 
 #### Код 1. Порядок импортов как часть логики
 
 ```python
+import html
 import os
 import sys
 
@@ -1268,7 +1398,10 @@ from core.rag_manager import preload_dependencies
 preload_dependencies()
 
 from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (...)
+
+from eval.judge import Judge, verdict_line
 ```
 
 В этом файле порядок строк имеет значение, и менять его нельзя.
@@ -1285,7 +1418,8 @@ from PyQt5.QtWidgets import (...)
 
 Фоновый поток нужен потому, что запрос к модели может идти минуты. Если выполнять
 его в основном потоке, окно замрёт. `RequestThread` делает работу отдельно и по
-завершении посылает сигнал.
+завершении посылает сигнал. Для судьи сделан отдельный `JudgeThread`: он тоже
+ходит к модели, но уже после ответа и со своим вопросом.
 
 #### Код 2. Фоновый поток и сигналы
 
@@ -1294,7 +1428,7 @@ class RequestThread(QThread):
     """Выполняет один ход диалога, чтобы не морозить интерфейс."""
 
     # Не перекрываем встроенный QThread.finished.
-    responded = pyqtSignal(str, bool, int)  # ответ, был ли RAG, сколько фрагментов
+    responded = pyqtSignal(str, bool, int, object)  # ответ, RAG, фрагменты, источники
     failed = pyqtSignal(str)
 
     def __init__(self, engine: ChatEngine, text: str, force_rag: bool = False):
@@ -1306,7 +1440,33 @@ class RequestThread(QThread):
     def run(self):
         try:
             result = self.engine.send(self.text, force_rag=self.force_rag)
-            self.responded.emit(result.answer, result.used_rag, result.fragments)
+            self.responded.emit(result.answer, result.used_rag, result.fragments, result.sources)
+        except LmClientError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # поток не должен падать молча
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class JudgeThread(QThread):
+    """Отдельный запрос судьи, чтобы окно не подвисало на время оценки."""
+
+    judged = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, judge: Judge, question: str, answer: str, contexts=(), reference=None):
+        super().__init__()
+        self.judge = judge
+        self.question = question
+        self.answer = answer
+        self.contexts = contexts
+        self.reference = reference
+
+    def run(self):
+        try:
+            verdict = self.judge.evaluate(
+                self.question, self.answer, self.contexts, reference=self.reference
+            )
+            self.judged.emit(verdict)
         except LmClientError as e:
             self.failed.emit(str(e))
         except Exception as e:  # поток не должен падать молча
@@ -1316,16 +1476,23 @@ class RequestThread(QThread):
 `QThread` это поток Qt. Мы наследуемся от него и переопределяем метод `run`,
 именно он выполняется в отдельном потоке.
 
-Запись `pyqtSignal(str, bool, int)` объявляет сигнал с типами. Вызов `emit(...)`
-отправляет его, а подключённый слот (`on_response`) выполнится в основном потоке.
-Qt сам заботится о безопасной передаче между потоками. Строка
-`super().__init__()` это обязательный вызов конструктора родителя `QThread`, без
-него поток не настроится.
+Запись `pyqtSignal(str, bool, int, object)` объявляет сигнал с типами. Четвёртый
+параметр это `object`: так передают любой Python-объект, здесь кортеж
+`RetrievedChunk`. Вызов `emit(...)` отправляет сигнал, а подключённый слот
+(`on_response`) выполнится в основном потоке. Qt сам заботится о безопасной
+передаче между потоками. Строка `super().__init__()` это обязательный вызов
+конструктора родителя `QThread`, без него поток не настроится.
 
 Имена `responded` и `failed` выбраны не случайно: у `QThread` уже есть собственный
 сигнал `finished`, и перекрывать его нельзя. Последний `except Exception as e` это
 подстраховка: поток не должен умереть молча, иначе окно навсегда останется в
 статусе «Думаю...». Любая ошибка превращается в сигнал `failed`.
+
+`JudgeThread` повторяет ту же схему и отличается только полезной нагрузкой: сигнал
+`judged` несёт готовый `JudgeVerdict`. Обрати внимание, что контекст для судьи у
+него в поле `contexts` — это те самые `result.sources` из `ChatResult`. Отдельный
+поток нужен ещё и потому, что судья это второй полноценный запрос к модели: он
+может идти десятки секунд, и запускать его в основном потоке нельзя.
 
 #### Код 3. Запуск запроса из интерфейса
 
@@ -1336,6 +1503,8 @@ def on_send(self):
         return
 
     self.input_field.clear()
+    self.reset_last_turn()
+    self.last_question = text
     self.set_busy(True)
 
     self.thread = RequestThread(self.engine, text, self.rag_check.isChecked())
@@ -1352,6 +1521,10 @@ def on_send(self):
 работает, `self.thread` не равен `None`. Метод `.connect(...)` подписывает слоты
 (методы окна) на сигналы потока.
 
+Перед новым запросом вызывается `reset_last_turn()`: он забывает предыдущий ответ и
+выключает кнопку «Оценить», чтобы судья не проверял устаревший текст. Сам вопрос
+запоминается в `self.last_question` — судье он нужен отдельно от истории.
+
 Дальше важная деталь: `.start()` запускает поток. Не путай с `run()`: вызов `run()`
 напрямую выполнил бы код в текущем, главном потоке и снова заморозил окно. А
 `self.thread.finished` это встроенный сигнал `QThread`, по нему снимаем блокировку.
@@ -1360,11 +1533,12 @@ def on_send(self):
 
 ```python
 def closeEvent(self, event):
-    if self.thread is not None and self.thread.isRunning():
-        # Ждём поток, иначе Qt убьёт его при выходе.
-        if not self.thread.wait(15000):
-            self.thread.terminate()
-            self.thread.wait(2000)
+    for thread in (self.thread, self.judge_thread):
+        if thread is not None and thread.isRunning():
+            # Ждём поток, иначе Qt убьёт его при выходе.
+            if not thread.wait(15000):
+                thread.terminate()
+                thread.wait(2000)
     if self.history is not None:
         self.history.force_save()
     event.accept()
@@ -1373,23 +1547,98 @@ def closeEvent(self, event):
 Метод `closeEvent` вызывается, когда окно закрывают.
 
 Если поток ещё выполняет запрос, его нельзя просто убить, Qt этого не любит.
-Сначала `self.thread.wait(15000)` ждёт завершения до 15 секунд и возвращает `True`,
-если поток успел закончить. Условие `if not self.thread.wait(...)` значит «не
+Сначала `thread.wait(15000)` ждёт завершения до 15 секунд и возвращает `True`,
+если поток успел закончить. Условие `if not thread.wait(...)` значит «не
 дождались», тогда применяем жёсткую остановку `terminate()` и снова ждём две
-секунды. В конце история сохраняется на диск, а `event.accept()` подтверждает
-закрытие окна.
+секунды. Цикл `for thread in (self.thread, self.judge_thread)` делает это для обоих
+потоков: за ответом и за судьёй может идти запрос к модели. В конце история
+сохраняется на диск, а `event.accept()` подтверждает закрытие окна.
+
+#### Код 5. Судья в окне
+
+```python
+def on_judge(self):
+    if self.judge_thread is not None or not self.last_answer:
+        return
+
+    self.set_busy(True)
+    self.judge_button.setEnabled(False)
+    self.status_label.setText("Судья проверяет последний ответ...")
+
+    self.judge_thread = JudgeThread(
+        self.judge, self.last_question or "", self.last_answer, self.last_sources
+    )
+    self.judge_thread.judged.connect(self.on_judged)
+    self.judge_thread.failed.connect(self.on_judge_failed)
+    self.judge_thread.finished.connect(self.on_judge_thread_finished)
+    self.judge_thread.start()
+
+
+def on_judged(self, verdict):
+    self.append_judge_block(verdict)
+    score = verdict.score if verdict.score is not None else "-"
+    self.set_status(COLOR_IDLE, f"Готов. Судья: оценка {score}/5.")
+
+
+def append_judge_block(self, verdict):
+    tone = verdict_tone(verdict)
+    background = VERDICT_BG[tone]
+    foreground = VERDICT_FG[tone]
+    reason = html.escape(verdict.reason or "")
+    block = (
+        f'<hr><table width="100%" cellspacing="0" cellpadding="8" bgcolor="{background}">'
+        f'<tr><td><b><font color="{foreground}">Судья</font></b>: '
+        f'<font color="{foreground}">{html.escape(verdict_line(verdict))}</font>'
+    )
+    if reason:
+        block += f'<br><font color="{foreground}">{reason}</font>'
+    block += "</td></tr></table>"
+    self.append_html(block)
+
+
+def append_html(self, markup: str):
+    cursor = self.chat_display.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    cursor.insertHtml(markup)
+    self.chat_display.setTextCursor(cursor)
+    self.chat_display.ensureCursorVisible()
+```
+
+Это кнопка «Оценить». Она берёт последний вопрос, последний ответ и фрагменты,
+которые получил движок. Эталон здесь не передаётся: у обычного диалога его нет,
+поэтому судья оценивает только то, отвечает ли текст на вопрос и опирается ли он
+на найденный контекст.
+
+Проверка `if self.judge_thread is not None or not self.last_answer: return` не даёт
+запустить второго судью и оценивать пустой ответ. Дальше идёт уже знакомая схема с
+потоком и сигналами.
+
+Отдельно про вывод. Задача была показать вердикт так, чтобы он не смешался с
+ответом, поэтому `append_judge_block` собирает фрагмент HTML. Тег `<hr>` отделяет
+блок линией, а `<table ... bgcolor="...">` даёт цветной фон: зелёный при хорошей
+оценке, жёлтый при средней и красный при плохой. Цвета выбирает `verdict_tone`.
+Функция `html.escape` обязательна: в тексте ответа и причины могут встретиться
+символы `<` или `&`, и без экранирования они сломали бы разметку.
+
+Вставка идёт не через `append`, а через курсор: `self.chat_display.textCursor()`
+берёт позицию, `movePosition(QTextCursor.End)` переносит её в конец,
+`insertHtml(markup)` вставляет размеченный текст. В конце
+`ensureCursorVisible()` прокручивает окно к новому блоку. Так вердикт всегда
+появляется под ответом и визуально отделён от него.
 
 Про остальной интерфейс. Элементы такие: индикатор и статус, выбор профиля,
-галочка «Искать в базе знаний», область истории, поле ввода и кнопки. Основные
-методы: `load_profile` создаёт менеджер и движок под профиль, `on_profile_changed`
-сохраняет старую историю и грузит новую, `update_display` перерисовывает историю
-(системные сообщения не показывает), плюс `on_save`, `on_clear`, `on_response`,
-`on_error`, `on_thread_finished`.
+галочка «Искать в базе знаний», область истории, поле ввода и кнопки «Отправить»,
+«Оценить», «Сохранить», «Забыть всё». Основные методы: `load_profile` создаёт
+менеджер и движок под профиль, `on_profile_changed` сохраняет старую историю и
+грузит новую, `update_display` перерисовывает историю (системные сообщения не
+показывает), `reset_last_turn` забывает предыдущий ответ и гасит кнопку судьи,
+плюс `on_save`, `on_clear`, `on_response`, `on_error`, `on_thread_finished`.
 
 Пара замечаний. Галочка RAG включается только если `rag.available`. Если
-зависимостей нет, она неактивна, а статус объясняет причину. И ещё: `on_response`
-вызывается, когда история уже обновлена движком внутри потока, поэтому остаётся
-только перерисовать экран.
+зависимостей нет, она неактивна, а статус объясняет причину. Кнопка «Оценить»
+включается только после ответа и выключается, пока идёт запрос или оценка. И ещё:
+`on_response` вызывается, когда история уже обновлена движком внутри потока,
+поэтому остаётся перерисовать экран и запомнить ответ с фрагментами для судьи.
 
 ---
 
@@ -1403,8 +1652,11 @@ def closeEvent(self, event):
 | `test_history` | Чтение `profiles.json`, промпт первым сообщением, разные файлы у профилей, переживание перезапуска, `clear()`, битый JSON, фильтрация мусора |
 | `test_tools` | Разбор маркеров `[RAG: ...]` в разных регистрах и с пробелами, удаление маркера |
 | `test_rag_helper` | Разбиение текста при `overlap == size` (без зацикливания), согласованность `available`, реакция на сбой `torch` |
-| `test_chat_engine` | Полный RAG-цикл: контекст во втором запросе ролью `user`, отсутствие `system` в середине, чистая история |
-| `test_forced_rag` | Принудительный режим: один запрос вместо двух, отсечение по порогу, поиск по тексту пользователя |
+| `test_chat_engine` | Полный RAG-цикл: контекст во втором запросе ролью `user`, отсутствие `system` в середине, чистая история, фрагменты в `sources` |
+| `test_forced_rag` | Принудительный режим: один запрос вместо двух, отсечение по порогу, поиск по тексту пользователя, источники с именами файлов |
+| `test_metrics` | Метрики поиска на бумаге: `hit@k`, `recall`, `MRR`, `precision`, поведение при пустых ожиданиях |
+| `test_golden_set` | `eval/golden_set.json`: читается, `id` уникальны, типы известные, у `answerable` есть источник |
+| `test_judge_parsing` | Разбор вердикта судьи: чистый JSON, JSON в ограждении, текст без JSON, строка вердикта |
 | `test_live` | Один реальный запрос к LM Studio (только с `--live`) |
 
 #### Код 1. Мини-фреймворк для проверок
@@ -1463,15 +1715,25 @@ class _FakeRag:
     def __init__(self, distances=(0.2, 0.25, 0.3)):
         self.distances = distances
 
+    def search_with_meta(self, query, top_k=3):
+        return [RetrievedChunk(f"ФРАГМЕНТ-{i + 1}", "fake.md", d)
+                for i, d in enumerate(self.distances[:top_k])]
+
     def search_with_scores(self, query, top_k=3):
-        return [(f"ФРАГМЕНТ-{i + 1}", d) for i, d in enumerate(self.distances[:top_k])]
+        return [(chunk.text, chunk.distance) for chunk in self.search_with_meta(query, top_k)]
+
+    def search(self, query, top_k=3):
+        return [chunk.text for chunk in self.search_with_meta(query, top_k)]
 ```
 
 Это подделка базы знаний. Ей можно задать любые distance, чтобы проверить порог
 релевантности. Здесь `available = True` это атрибут класса (общий для всех
 экземпляров), `self.distances[:top_k]` это срез (берём не больше `top_k` значений),
-а `enumerate(...)` даёт пару (индекс, значение), из которых собирается
-`("ФРАГМЕНТ-1", 0.2)` и так далее.
+а `enumerate(...)` даёт пару (индекс, значение). В `search_with_meta` из каждой пары
+собирается настоящий `RetrievedChunk` с источником `fake.md`: по нему видно, что
+наружу уезжает не только текст, но и имя файла с distance. Два оставшихся метода
+повторяют формы `search_with_scores` и `search` и нужны потому, что движок и
+инструмент зовут именно их.
 
 Такие заглушки ценны тем, что тесты проверяют алгоритм Sivi, а не качество модели:
 можно задать «модель ответила маркером» или «база вернула плохие фрагменты» и
@@ -1486,6 +1748,9 @@ def main():
     test_rag_helper()
     test_chat_engine()
     test_forced_rag()
+    test_metrics()
+    test_golden_set()
+    test_judge_parsing()
     if "--live" in sys.argv:
         test_live()
 
@@ -1511,6 +1776,209 @@ if __name__ == "__main__":
 `__name__` равна `"__main__"` только когда файл запущен напрямую. Благодаря этому
 `test.py` можно и импортировать (тогда тесты не запустятся сами), и запускать как
 программу.
+
+---
+
+### 6.9 `eval/`: проверка качества ответов и поиска
+
+`test.py` проверяет, что логика Sivi работает: заглушки, крайние случаи, отсутствие
+падений. Но он ничего не говорит о качестве: правильно ли нашлась заметка и верен
+ли ответ. Для этого и нужна папка `eval/`. Она не участвует в обычном чате и
+пользуется теми же сервисами `core/`.
+
+Проверка идёт двумя слоями.
+
+1. **Метрики поиска** — детерминированные, без модели. Считаются по golden set:
+   есть ли нужный файл в первых `top_k` и на каком месте.
+2. **Оценка судьи** — LLM-судья по рубрике. Это та же модель, но с отдельным
+   контекстом: она не видит историю диалога и оценивает один ответ.
+
+| Файл | Смысл |
+| --- | --- |
+| `golden_set.json` | Вопросы, эталоны, ожидаемые источники и тип записи |
+| `metrics.py` | Метрики поиска, чистые функции без модели |
+| `judge.py` | Судья: рубрика, отдельный контекст, разбор вердикта |
+| `run_eval.py` | Прогон golden set, цветной вывод и отчёты |
+| `make_drafts.py` | Генератор черновиков вопросов по заметкам |
+
+#### Код 1. Формат golden set
+
+```json
+{
+  "id": "mcp-001",
+  "type": "answerable",
+  "question": "Что такое MCP и с чем его сравнивают?",
+  "expected_sources": ["MCP-протокол.md"],
+  "reference_answer": "MCP (Model Context Protocol) — единый стандарт...",
+  "key_facts": ["Model Context Protocol", "Anthropic", "USB-C", "JSON-RPC 2.0"],
+  "note": "Базовый вопрос к единственной заметке про MCP."
+}
+```
+
+Файл это объект с полем `items`, где лежит список таких записей. Поле `type`
+бывает трёх видов, и от него зависит, что считается успехом.
+
+| Тип | Что проверяет |
+| --- | --- |
+| `answerable` | Ответ есть в `data/`. Ожидаем нужный файл в выдаче и опору на контекст |
+| `open` | Темы в базе нет, но модель может ответить своими знаниями. Ждём ответ по теме без мусорного RAG |
+| `unanswerable` | Данных нет нигде. Ждём честное «не знаю», а не выдуманные факты |
+
+`expected_sources` и есть эталон для поиска: по именам файлов считаются
+retrieval-метрики. `reference_answer` и `key_facts` нужны судье, чтобы понять,
+совпал ли ответ по смыслу. `draft: true` помечает ещё не вычитанные записи.
+
+#### Код 2. Метрики поиска
+
+```python
+def hit_at_k(retrieved_sources, expected_sources, k=None):
+    """Есть ли хотя бы один ожидаемый источник в первых k. None, если ожидаемых нет."""
+    expected = set(expected_sources or [])
+    if not expected:
+        return None
+    return bool(expected & set(_top_k(retrieved_sources, k)))
+
+
+def reciprocal_rank(retrieved_sources, expected_sources):
+    """1 / позиция первого попадания. 0.0, если попаданий нет."""
+    expected = set(expected_sources or [])
+    if not expected:
+        return None
+    for rank, source in enumerate(retrieved_sources or [], start=1):
+        if source in expected:
+            return 1 / rank
+    return 0.0
+```
+
+Здесь намеренно нет ни ChromaDB, ни модели. На вход идут списки имён файлов, на
+выход числа. Такие функции легко проверить в `test.py`, и они никогда не врут из-за
+случайности генерации.
+
+Основа всего — множества. `set(expected_sources)` даёт быструю проверку вхождения,
+а `expected & set(retrieved_sources)` это пересечение: если оно непустое, нужный
+файл нашёлся. Метрика `hit@k` отвечает «да или нет», `reciprocal_rank` учитывает
+позицию: первое место даёт `1.0`, второе `0.5`, третье `0.33`, а промах `0.0`.
+Функция `mean` в отчёте усредняет эти числа и игнорирует `None`, поэтому записи
+`open` и `unanswerable` не портят статистику поиска.
+
+#### Код 3. Судья и отдельный контекст
+
+```python
+class Judge:
+    def build_messages(self, question, answer, contexts=(), reference=None):
+        return [
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": self._task(question, answer, contexts, reference)},
+        ]
+
+    def evaluate(self, question, answer, contexts=(), reference=None) -> JudgeVerdict:
+        messages = self.build_messages(question, answer, contexts, reference)
+        raw = self.client.send_message(
+            messages, temperature=self.temperature, max_tokens=self.max_tokens
+        )
+        return parse_verdict(raw)
+```
+
+Модель в проекте одна, поэтому судья это она же, но в другом контексте. Слово
+«отдельный» здесь ключевое: `build_messages` каждый раз собирает новый список из
+двух сообщений. Туда не попадают ни история диалога, ни системный промпт Sivi,
+ни предыдущие оценки. Судья видит только вопрос, ответ, найденный контекст и
+необязательный эталон, поэтому не может опереться на подсказку из прошлого.
+
+Температура судьи равна нулю: оценка должна быть как можно более повторяемой.
+Рубрика в `JUDGE_SYSTEM_PROMPT` просит разобрать ответ по полям `relevant`,
+`grounded`, `correct` и `score`, а закончить строгим JSON. Когда эталона нет (так
+бывает в GUI), поле `correct` вернётся `null`, и это нормально.
+
+```python
+def parse_verdict(raw):
+    """Разбор ответа судьи. Терпим к лишнему тексту вокруг JSON."""
+    data = extract_json(raw) or {}
+    reason = str(data.get("reason") or "").strip()
+    raw = raw or ""
+    return JudgeVerdict(
+        score=_as_score(data.get("score")),
+        correct=_as_bool(data.get("correct")),
+        grounded=_as_bool(data.get("grounded")),
+        relevant=_as_bool(data.get("relevant")),
+        reason=reason or raw.strip()[:300],
+        raw=raw,
+    )
+```
+
+Модели разные, и просить «верни только JSON» недостаточно: модель может обернуть
+его в пояснение или в ограждение ```` ```json ````. Поэтому `extract_json` сначала
+пробует разобрать текст целиком, потом ищет первый `{...}`, а `_as_bool` и
+`_as_score` терпимо принимают `true`, `"да"` и `"5"`. Если JSON не нашёлся вовсе,
+вердикт получит `score=None`, а в `reason` попадёт сырой ответ. Оценка не упадёт,
+просто отчёт честно покажет, что судья не разобрался.
+
+#### Код 4. Прогон golden set
+
+```python
+def run_item(item, rag, client, history, judge, top_k):
+    row = {...}
+    row.update(retrieval_row(item, rag, top_k))
+
+    history.clear()
+    tools = ToolManager(rag, top_k=top_k)
+    engine = ChatEngine(client, history, tools)
+    try:
+        result = engine.send(item["question"], force_rag=True)
+    except LmClientError as error:
+        row["error"] = str(error)
+        return row
+
+    row["answer"] = result.answer
+    row["sources"] = [{"source": chunk.source, "distance": chunk.distance}
+                      for chunk in result.sources]
+
+    if judge is not None:
+        row["judge"] = judge.evaluate(
+            item["question"], result.answer, result.sources,
+            reference=item.get("reference_answer"),
+        )
+    return row
+```
+
+На каждый вопрос делается три вещи: честный поиск для метрик, один ход `ChatEngine`
+и запрос к судье.
+
+`history.clear()` перед каждым вопросом это важная деталь. Через один и тот же
+`HistoryManager` идут все вопросы, и без очистки текущий вопрос видел бы предыдущие.
+Прогон перестал бы быть независимым, а ответы «плыли» бы от порядка записей. После
+`s.clear()` остаётся только системный промпт.
+
+Ход выполняется с `force_rag=True`: так путь один и тот же для всех вопросов, и
+поиск идёт по тексту вопроса, а не по решению модели. Метрики считаются заранее по
+`rag.search_with_meta`, до фильтра по порогу: для `recall@k` нужно видеть всю
+выдачу `top_k`, а не только прошедшие фрагменты. Зато в `result.sources` лежит ровно
+то, что получила модель, и эти же фрагменты уходят судье.
+
+Отчёт собирается в двух видах: Markdown для чтения и JSON для машинной обработки.
+В консоли каждый вопрос печатается блоками, а ответ модели и вердикт судьи
+разделены цветом: у `Palette` отдельные методы `model`, `good`, `mid`, `bad`. На
+цветном терминале видно сразу, где чей текст. Цвета отключаются сами, если вывод
+идёт не в терминал или задан `NO_COLOR`.
+
+#### Код 5. Черновики вопросов по заметкам
+
+```python
+QUESTION_PROMPT = (
+    "Ниже заметка из базы знаний. Составь по ней {count} вопросов, ответы на которые "
+    "полностью есть в тексте заметки. ... Верни только JSON-массив ..."
+)
+```
+
+Вручную придумывать десятки вопросов долго, поэтому `make_drafts.py` просит модель
+составить черновики по каждой заметке. В ответе должны быть `question`,
+`reference_answer` и `key_facts`. Файл `eval/drafts_<время>.json` содержит пометку
+`draft: true` и не попадает в git.
+
+Важно понимать границу: это именно черновики. Модель может придумать факт, которого
+в заметке нет, или сформулировать вопрос с двусмысленным ответом. Поэтому черновики
+просматриваются человеком и только потом переносятся в `golden_set.json`. В
+`test.py` проверяет структуру датасета, а не его содержание.
 
 ---
 
@@ -1563,16 +2031,17 @@ sequenceDiagram
     L-->>C: "[RAG: что такое MCP]"
     C-->>E: текст с маркером
     E->>T: handle(answer)
-    T->>R: search_with_scores("что такое MCP")
-    R-->>T: [(фрагмент, distance), ...]
+    T->>R: search_with_meta("что такое MCP")
+    R-->>T: [RetrievedChunk(text, source, distance), ...]
     T->>T: отсечь distance > 0.34
-    T-->>E: готовый контекст
+    T-->>E: ToolResult(контекст, фрагменты)
     E->>C: send_message(history + assistant(маркер) + user(контекст))
     C->>L: второй запрос
     L-->>C: финальный ответ
     C-->>E: ответ
     E->>E: strip_marker(...)
     E->>H: add_message("assistant", финальный ответ)
+    E-->>E: ChatResult с sources
 ```
 
 Два запроса к модели. В историю попадает только `user` и финальный `assistant`, а
@@ -1596,16 +2065,16 @@ sequenceDiagram
 
     U->>E: send(текст, force_rag=True)
     E->>T: context_for(текст)
-    T->>R: search_with_scores(текст)
-    R-->>T: фрагменты + distance
+    T->>R: search_with_meta(текст)
+    R-->>T: RetrievedChunk с source и distance
     T->>T: отсечь нерелевантное
     alt есть релевантные фрагменты
-        T-->>E: контекст, N
+        T-->>E: контекст, фрагменты
         E->>C: send_message(history + user(контекст))
         C->>L: один запрос
         L-->>C: ответ
         C-->>E: ответ
-        E-->>U: ChatResult(used_rag=True, fragments=N)
+        E-->>U: ChatResult(used_rag=True, sources=фрагменты)
     else ничего не подошло
         T-->>E: (None, 0)
         E->>C: send_message(history)
@@ -1681,6 +2150,58 @@ sequenceDiagram
 
 ---
 
+### 7.7 Прогон golden set и судья
+
+Проверка качества идёт отдельным сценарием, чат в нём не участвует. По каждому
+вопросу сначала считается поиск, потом модель отвечает, потом судья выносит вердикт.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as run_eval.py
+    participant D as golden set
+    participant G as RagManager
+    participant E as ChatEngine
+    participant C as LmClient
+    participant J as Judge
+    participant L as LM Studio
+
+    R->>D: читает items
+    loop каждый вопрос
+        R->>G: search_with_meta(вопрос, top_k)
+        G-->>R: фрагменты с source и distance
+        R->>R: метрики hit@k, recall, MRR
+        R->>E: send(вопрос, force_rag=True), история очищена
+        E->>G: поиск по тексту вопроса
+        E->>C: запрос с контекстом
+        C->>L: POST /v1/chat/completions
+        L-->>C: ответ
+        C-->>E: текст
+        E-->>R: ChatResult с sources
+        R->>J: evaluate(вопрос, ответ, sources, эталон)
+        J->>C: отдельный контекст, temperature=0
+        C->>L: второй запрос
+        L-->>C: вердикт JSON
+        C-->>J: score, correct, grounded, relevant
+        J-->>R: JudgeVerdict
+    end
+    R->>R: отчёт в eval/results/ (Markdown и JSON)
+```
+
+Три момента, которые здесь важны.
+
+1. История очищается перед каждым вопросом, иначе ответы зависят от порядка записей.
+2. Судья получает свой, отдельный контекст. Та же модель, но уже как оценщик, и
+   прошлые оценки она не видит.
+3. Запросы идут строго по одному: в LM Studio одна модель, и параллельные вызовы
+   только мешали бы друг другу.
+
+Результат это два файла в `eval/results/`. В Markdown удобно читать сводку и
+разборы, JSON пригодится для сравнения прогонов между собой. В GUI тот же судья
+доступен по кнопке «Оценить», только эталон там не передаётся.
+
+---
+
 ## 8. Кто о ком знает
 
 Зависимости направлены в одну сторону: точки входа, потом движок, потом сервисы.
@@ -1693,11 +2214,18 @@ sequenceDiagram
 | `rag_manager.py` | заметки, эмбеддинги, ChromaDB | диалог, модель, интерфейс |
 | `tool_manager.py` | `RagManager`, формат контекста | модель, историю, интерфейс |
 | `chat_engine.py` | остальные сервисы | как именно рисуется интерфейс |
+| `eval/metrics.py` | имена файлов и числа | модель, база, интерфейс |
+| `eval/judge.py` | `LmClient`, формат вердикта | историю Sivi, GUI, ChromaDB |
+| `eval/run_eval.py` | `RagManager`, `ChatEngine`, `Judge`, golden set | как рисуется окно |
+| `eval/make_drafts.py` | `LmClient`, заметки `data/` | диалог, GUI, базу векторов |
 | `main_console.py` / `chat_window.py` | `ChatEngine` и прочие сервисы | детали HTTP и векторов |
 
 Такое разделение и есть главная учебная ценность проекта: каждый файл можно читать
 и тестировать отдельно от остальных. Именно поэтому `test.py` подставляет заглушки
-вместо сети и базы, движку ведь всё равно, кто именно выполняет работу.
+вместо сети и базы, движку ведь всё равно, кто именно выполняет работу. Обрати
+внимание, что `eval/judge.py` не знает про историю Sivi: он получает готовые
+вопрос, ответ и контекст, поэтому его рубрика не зависит от того, как устроен чат.
+А `gui/chat_window.py` знает про `Judge`, потому что кнопка «Оценить» живёт в окне.
 
 ---
 
@@ -1716,6 +2244,13 @@ sequenceDiagram
 | Модель эмбеддингов | `core/rag_manager.py`, `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` |
 | Порог релевантности | `core/rag_manager.py`, `MAX_RELEVANT_DISTANCE` | `0.34` |
 | Сколько фрагментов брать | `ToolManager(top_k=...)` | `3` |
+| Модель для eval | `eval/run_eval.py --model` | по умолчанию из LM Studio |
+| Температура судьи | `eval/judge.py`, `JUDGE_TEMPERATURE` | `0.0` |
+| Лимит токенов судьи | `eval/judge.py`, `JUDGE_MAX_TOKENS` | `1024` |
+| Сколько фрагментов в eval | `eval/run_eval.py --top-k` | `3` |
+| Вопросы для проверки | `eval/golden_set.json` | 5 черновиков |
+| Черновики вопросов | `eval/make_drafts.py --per-file`, `--negatives` | `2` / `0` |
+| Отчёты прогона | `eval/results/` | `report_*.md`, `report_*.json` |
 
 ---
 
@@ -1724,8 +2259,9 @@ sequenceDiagram
 Это не ошибки, а сознательные упрощения учебной версии. Полезно знать, чтобы
 понимать границы проекта.
 
-- Не показывается, какие именно заметки нашлись. В интерфейс уходит только число
-  фрагментов.
+- В окне не показывается, какие именно заметки нашлись: в интерфейс уходит только
+  число фрагментов. Сами фрагменты при этом есть в `ChatResult.sources`, ими
+  пользуются судья и отчёты.
 - Индекс не сохраняется на диск. ChromaDB работает в памяти, поэтому при каждом
   запуске эмбеддинги считаются заново.
 - Модель может написать в маркер лишний текст. Из `[RAG: ...]` берётся всё
@@ -1733,6 +2269,11 @@ sequenceDiagram
 - Нет потоковой выдачи ответа, ответ приходит целиком, одним сообщением.
 - RAG-контекст не попадает в сохраняемую историю. В диалоге остаются только вопрос
   и финальный ответ.
+- Судья это та же модель, что и отвечает. Отдельный контекст убирает влияние
+  истории, но не убирает склонности хвалить собственные ответы. Поэтому в отчёте
+  рядом с оценкой всегда есть метрики поиска и расстояния, а не только вердикт.
+- Golden set небольшой и частично состоит из черновиков модели. Он показывает
+  порядок величины, а не абсолютное качество, и требует ручной вычитки.
 
 ---
 
@@ -1755,15 +2296,20 @@ sequenceDiagram
 | `NamedTuple` | `class ChatResult(NamedTuple)` | `chat_engine.py` |
 | Списочное включение | `[m for m in data if isinstance(m, dict)]` | `history_manager.py` |
 | Генераторное выражение | `"\n\n".join(f"..." for i, c in enumerate(found))` | `tool_manager.py` |
-| Распаковка кортежа | `for document, distance in ...` | `tool_manager.py` |
-| Возврат нескольких значений | `return context, len(found)` | `tool_manager.py` |
-| `enumerate` | `enumerate(found)` | `tool_manager.py` |
-| `zip` | `list(zip(documents, distances))` | `rag_manager.py` |
+| Распаковка кортежа | `context, found = self.tools.context_for(...)` | `chat_engine.py` |
+| Возврат нескольких значений | `return context, found` | `tool_manager.py` |
+| `enumerate` | `for index, document in enumerate(documents)` | `rag_manager.py` |
+| Неизменяемый результат | `sources=tuple(found)` | `chat_engine.py` |
 | Множество и `in` | `if command in EXIT_COMMANDS` | `main_console.py` |
+| Пересечение множеств | `expected & set(retrieved_sources)` | `eval/metrics.py` |
 | Тернарный оператор | `" [RAG]" if used else ""` | `main_console.py` |
 | `global` | `global _preload_error` | `rag_manager.py` |
 | `importlib.util.find_spec` | проверка пакета без импорта | `rag_manager.py` |
 | Регулярные выражения | `RAG_PATTERN = re.compile(...)` | `tool_manager.py` |
+| Разбор JSON | `json.loads(match.group(0))` | `eval/judge.py` |
+| `argparse` | `parser.add_argument("--limit", type=int)` | `eval/run_eval.py` |
+| ANSI-цвета | `f"\033[{code}m{text}\033[0m"` | `eval/run_eval.py` |
+| Экранирование HTML | `html.escape(verdict.reason or "")` | `gui/chat_window.py` |
 | `os.path.join` и `dirname` | пути, не зависящие от запуска | `history_manager.py` |
 | `os.replace` | атомарная замена файла | `history_manager.py` |
 | `if __name__ == "__main__"` | точка входа файла | `main_console.py`, `test.py` |
@@ -1796,7 +2342,7 @@ if rag.available:      # не rag.available()
 
 ```python
 context, found = self.tools.context_for(user_text)   # функция вернула пару
-for document, distance in pairs:                     # в pairs лежат пары
+for index, document in enumerate(documents):         # пара (индекс, значение)
 ```
 
 `global` нужен, потому что без него присваивание внутри функции создало бы
@@ -1805,6 +2351,39 @@ for document, distance in pairs:                     # в pairs лежат па�
 `if __name__ == "__main__":` это проверка «файл запущен как программа, а не
 импортирован». Она позволяет файлу быть и исполняемым, и импортируемым без
 побочных эффектов.
+
+Разбор `json.loads` в судье устроен в два захода, и это стоит увидеть отдельно:
+
+```python
+try:
+    data = json.loads(candidate)
+except (ValueError, TypeError):
+    continue
+if isinstance(data, dict):
+    return data
+```
+
+Функция `json.loads` превращает текст в словарь Python, но падает с `ValueError`,
+если текст не JSON. Поэтому попытка обёрнута в `try`, а `except` не пробрасывает
+ошибку дальше, а переходит к следующему варианту. Проверка `isinstance(data, dict)`
+нужна, потому что валидный JSON бывает и списком: нам нужен именно объект с полями
+вердикта.
+
+ANSI-цвета в консоли это просто escape-последовательности:
+
+```python
+def paint(self, text, code):
+    return f"\033[{code}m{text}\033[0m" if self.enabled else text
+```
+
+Часть `\033[` начинает команду, число задаёт цвет, а `\033[0m` сбрасывает
+форматирование. Никакой библиотеки для этого не нужно. Но цвета уместны только в
+терминале, поэтому `Palette` создаётся с флагом `enabled`: при перенаправлении
+вывода в файл или при `NO_COLOR` строки остаются обычными.
+
+`html.escape` в GUI решает обратную задачу: текст ответа вставляется в HTML, и
+символы `<`, `>` и `&` в нём надо заменить на безопасные. Иначе ответ модели вроде
+`a < b` сломал бы разметку блока судьи.
 
 ---
 
@@ -1818,10 +2397,11 @@ Sivi это компактный пример того, как из нескол
 - `RagManager` знает только про заметки и векторы;
 - `ToolManager` связывает текст модели с базой знаний;
 - `ChatEngine` расставляет порядок шагов;
-- консоль и окно это взаимозаменяемые пульты.
+- консоль и окно это взаимозаменяемые пульты;
+- `eval/` измеряет, насколько хорошо всё это работает.
 
 Разбор кода в разделе 6 показывает не только то, что написано, но и почему так:
 почему своя ошибка лучше встроенной, зачем `None` вместо `or`, почему запись
-атомарная, как устроена регулярка для маркера и откуда взялся порядок импортов
-`torch` до PyQt5. С этими объяснениями аналог можно собрать с нуля, а не просто
-пересказать своими словами.
+атомарная, как устроена регулярка для маркера, откуда взялся порядок импортов
+`torch` до PyQt5 и зачем судье отдельный контекст. С этими объяснениями аналог
+можно собрать с нуля, а не просто пересказать своими словами.

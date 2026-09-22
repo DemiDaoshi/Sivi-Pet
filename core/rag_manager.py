@@ -1,5 +1,6 @@
 import importlib.util
 import os
+from typing import NamedTuple
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DATA_DIR = os.path.join(PROJECT_ROOT, "data")
@@ -8,6 +9,13 @@ EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 # Модели e5 ожидают префиксы "passage: " для документов и "query: " для запросов.
 PASSAGE_PREFIX = "passage: "
 QUERY_PREFIX = "query: "
+
+
+class RetrievedChunk(NamedTuple):
+    text: str
+    source: str
+    distance: float | None = None
+
 
 REQUIRED_PACKAGES = ("chromadb", "sentence_transformers")
 
@@ -166,8 +174,8 @@ class RagManager:
             start += step
         return chunks
 
-    def search_with_scores(self, query, top_k=3):
-        """Список (фрагмент, distance); пустой — если RAG недоступен."""
+    def search_with_meta(self, query, top_k=3) -> list[RetrievedChunk]:
+        """Найденные фрагменты с источником и distance; пустой список — если RAG недоступен."""
         query = (query or "").strip()
         if not query:
             return []
@@ -182,12 +190,24 @@ class RagManager:
         results = self._collection.query(
             query_embeddings=query_embedding,
             n_results=min(top_k, total),
-            include=["documents", "distances"],
+            include=["documents", "distances", "metadatas"],
         )
         documents = (results.get("documents") or [[]])[0]
         distances = (results.get("distances") or [[]])[0]
-        return list(zip(documents, distances))
+        metadatas = (results.get("metadatas") or [[]])[0]
+
+        chunks = []
+        for index, document in enumerate(documents):
+            distance = distances[index] if index < len(distances) else None
+            metadata = metadatas[index] if index < len(metadatas) else {}
+            source = (metadata or {}).get("source", "")
+            chunks.append(RetrievedChunk(document, source, distance))
+        return chunks
+
+    def search_with_scores(self, query, top_k=3):
+        """Список (фрагмент, distance); пустой — если RAG недоступен."""
+        return [(chunk.text, chunk.distance) for chunk in self.search_with_meta(query, top_k)]
 
     def search(self, query, top_k=3):
         """Релевантные фрагменты; пустой список — если RAG недоступен."""
-        return [document for document, _ in self.search_with_scores(query, top_k)]
+        return [chunk.text for chunk in self.search_with_meta(query, top_k)]

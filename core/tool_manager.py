@@ -1,9 +1,15 @@
 import re
+from typing import NamedTuple
 
-from core.rag_manager import MAX_RELEVANT_DISTANCE
+from core.rag_manager import MAX_RELEVANT_DISTANCE, RetrievedChunk
 
 # Модель отвечает "[RAG: запрос]"; разбор терпим к регистру и пробелам.
 RAG_PATTERN = re.compile(r"\[\s*RAG\s*:\s*(?P<query>.+?)\s*\]", re.IGNORECASE | re.DOTALL)
+
+
+class ToolResult(NamedTuple):
+    text: str
+    chunks: tuple[RetrievedChunk, ...] = ()
 
 
 class ToolManager:
@@ -26,35 +32,38 @@ class ToolManager:
         """Убирает служебные маркеры [RAG: ...] из ответа модели."""
         return RAG_PATTERN.sub("", text or "").strip()
 
-    def context_for(self, query: str) -> tuple[str | None, int]:
-        """Ищет по базе принудительно. Возвращает (текст контекста, число фрагментов)."""
+    def context_for(self, query: str) -> tuple[str | None, list[RetrievedChunk]]:
+        """Ищет по базе принудительно. Возвращает (текст контекста, найденные фрагменты)."""
         if not self.rag.available:
-            return None, 0
+            return None, []
 
-        found = [document for document, distance
-                 in self.rag.search_with_scores(query, top_k=self.top_k)
-                 if distance <= self.max_distance]
+        found = [chunk for chunk in self.rag.search_with_meta(query, top_k=self.top_k)
+                 if chunk.distance is not None and chunk.distance <= self.max_distance]
         if not found:
-            return None, 0
+            return None, []
 
         formatted = "\n\n".join(
-            f"--- Фрагмент {i + 1} ---\n{chunk}" for i, chunk in enumerate(found)
+            f"--- Фрагмент {i + 1} ---\n{chunk.text}" for i, chunk in enumerate(found)
         )
         return (f"Контекст из базы знаний по запросу «{query}»:\n\n{formatted}\n\n"
-                "Ответь пользователю, опираясь на этот контекст."), len(found)
+                "Ответь пользователю, опираясь на этот контекст."), found
 
-    def handle(self, answer: str) -> str | None:
-        """Инструмент, запрошенный моделью. Возвращает текст или None."""
+    def handle(self, answer: str) -> ToolResult | None:
+        """Инструмент, запрошенный моделью. Возвращает ToolResult или None."""
         query = self.extract_query(answer)
         if query is None:
             return None
 
         if not self.rag.available:
-            return (f"Контекст из базы знаний недоступен ({self.rag.unavailable_reason()}). "
-                    "Ответь пользователю, опираясь только на свои знания.")
+            return ToolResult(
+                f"Контекст из базы знаний недоступен ({self.rag.unavailable_reason()}). "
+                "Ответь пользователю, опираясь только на свои знания."
+            )
 
-        context, found = self.context_for(query)
-        if not found:
-            return (f"В базе знаний ничего не найдено по запросу «{query}». "
-                    "Ответь пользователю, опираясь только на свои знания.")
-        return context
+        context, chunks = self.context_for(query)
+        if not chunks:
+            return ToolResult(
+                f"В базе знаний ничего не найдено по запросу «{query}». "
+                "Ответь пользователю, опираясь только на свои знания."
+            )
+        return ToolResult(context, tuple(chunks))

@@ -8,6 +8,7 @@ class ChatResult(NamedTuple):
     answer: str
     used_rag: bool
     fragments: int = 0
+    sources: tuple = ()
 
 
 class ChatEngine:
@@ -30,22 +31,22 @@ class ChatEngine:
         answer = self.client.send_message(self.history.messages)
 
         # Проверяем, не запросила ли модель инструмент.
-        tool_result = self.tools.handle(answer)
-        if tool_result is None:
+        tool = self.tools.handle(answer)
+        if tool is None:
             self.history.add_message("assistant", answer)
             return ChatResult(answer, used_rag=False)
 
         # Контекст уходит ролью user: system в середине диалога даёт 400.
         request_messages = self.history.messages + [
             {"role": "assistant", "content": answer},
-            {"role": "user", "content": tool_result},
+            {"role": "user", "content": tool.text},
         ]
         answer = self.tools.strip_marker(self.client.send_message(request_messages))
         self.history.add_message("assistant", answer)
-        return ChatResult(answer, used_rag=True)
+        return ChatResult(answer, used_rag=True, fragments=len(tool.chunks), sources=tool.chunks)
 
-    def _answer_with_context(self, context: str, found: int) -> ChatResult:
+    def _answer_with_context(self, context: str, found: list) -> ChatResult:
         request_messages = self.history.messages + [{"role": "user", "content": context}]
         answer = self.tools.strip_marker(self.client.send_message(request_messages))
         self.history.add_message("assistant", answer)
-        return ChatResult(answer, used_rag=True, fragments=found)
+        return ChatResult(answer, used_rag=True, fragments=len(found), sources=tuple(found))

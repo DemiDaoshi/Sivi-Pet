@@ -15,8 +15,11 @@ sys.stdout.reconfigure(encoding="utf-8")
 from core.chat_engine import ChatEngine
 from core.history_manager import HistoryManager, history_path_for_profile, load_profiles
 from core.lm_client import DEFAULT_MAX_TOKENS, LmClient, LmClientError
-from core.rag_manager import RagManager
+from core.rag_manager import RagManager, RetrievedChunk
 from core.tool_manager import ToolManager
+from eval.judge import parse_verdict, verdict_line
+from eval.metrics import hit_at_k, mean, precision_at_k, recall_at_k, reciprocal_rank, share_true
+from eval.run_eval import load_golden_set
 
 FAILURES = []
 
@@ -104,7 +107,7 @@ def test_rag_helper():
             check("причина упоминает torch", "torch" in (broken.unavailable_reason() or ""),
                   broken.unavailable_reason())
             check("инструмент сообщает причину",
-                  "1114" in (ToolManager(broken).handle("[RAG: тест]") or ""))
+                  "1114" in (ToolManager(broken).handle("[RAG: тест]").text or ""))
         finally:
             rm._preload_error = None
 
@@ -126,11 +129,15 @@ class _FakeRag:
     def __init__(self, distances=(0.2, 0.25, 0.3)):
         self.distances = distances
 
+    def search_with_meta(self, query, top_k=3):
+        return [RetrievedChunk(f"ФРАГМЕНТ-{i + 1}", "fake.md", d)
+                for i, d in enumerate(self.distances[:top_k])]
+
     def search_with_scores(self, query, top_k=3):
-        return [(f"ФРАГМЕНТ-{i + 1}", d) for i, d in enumerate(self.distances[:top_k])]
+        return [(chunk.text, chunk.distance) for chunk in self.search_with_meta(query, top_k)]
 
     def search(self, query, top_k=3):
-        return [document for document, _ in self.search_with_scores(query, top_k)]
+        return [chunk.text for chunk in self.search_with_meta(query, top_k)]
 
 
 def test_chat_engine():
@@ -154,6 +161,9 @@ def test_chat_engine():
           not any("Контекст из базы знаний" in m["content"] for m in history.messages))
     check("история: system + user + assistant",
           [m["role"] for m in history.messages] == ["system", "user", "assistant"])
+    check("найденные фрагменты попали в sources",
+          [chunk.text for chunk in result.sources]
+          == ["ФРАГМЕНТ-1", "ФРАГМЕНТ-2", "ФРАГМЕНТ-3"], result.sources)
 
     client = _FakeClient(["Просто ответ"])
     result = ChatEngine(client, history, ToolManager(_FakeRag())).send("обычный вопрос")
@@ -181,6 +191,9 @@ def test_forced_rag():
     check("история не засорена служебным контекстом",
           [m["role"] for m in history.messages] == ["system", "user", "assistant"])
     check("контекст ушёл ролью user", client.calls[0][-1]["role"] == "user")
+    check("sources указывают на файл-источник",
+          result.sources[0].source == "fake.md" and result.sources[0].distance == 0.2,
+          result.sources[0])
 
     client = _FakeClient(["Отвечаю сам"])
     result = ChatEngine(client, history, ToolManager(_FakeRag(distances=(0.9, 0.95)))).send(
@@ -197,8 +210,49 @@ def test_forced_rag():
     os.remove(history.filepath)
 
 
+def test_metrics():
+    print("[6] Метрики поиска")
+    retrieved = ["a.md", "b.md", "c.md"]
+    check("hit@3 находит ожидаемое", hit_at_k(retrieved, ["b.md"], 3) is True)
+    check("hit@1 не видит дальнее", hit_at_k(retrieved, ["c.md"], 1) is False)
+    check("hit без ожидаемых источников = None", hit_at_k(retrieved, [], 3) is None)
+    check("recall@2 считает долю", recall_at_k(retrieved, ["a.md", "c.md"], 2) == 0.5)
+    check("mrr считает позицию", reciprocal_rank(retrieved, ["b.md"]) == 0.5)
+    check("mrr без попаданий = 0", reciprocal_rank(retrieved, ["z.md"]) == 0.0)
+    check("precision@3", precision_at_k(retrieved, ["a.md", "b.md"], 3) == 2 / 3)
+    check("mean игнорирует None", mean([1, None, 3]) == 2)
+    check("mean без данных = None", mean([None]) is None)
+    check("share_true игнорирует None", share_true([True, False, None]) == 0.5)
+
+
+def test_golden_set():
+    print("[7] Golden set")
+    items = load_golden_set()
+    check("датасет читается", len(items) > 0)
+    check("id уникальны", len({item["id"] for item in items}) == len(items))
+    check("типы известные",
+          all(item["type"] in {"answerable", "open", "unanswerable"} for item in items))
+    check("answerable всегда с источником",
+          all(item["expected_sources"] for item in items if item["type"] == "answerable"))
+
+
+def test_judge_parsing():
+    print("[8] Судья: разбор вердикта")
+    verdict = parse_verdict(
+        '{"score": 5, "relevant": true, "grounded": false, "correct": true, "reason": "ок"}')
+    check("JSON разобран",
+          verdict.score == 5 and verdict.relevant is True
+          and verdict.grounded is False and verdict.correct is True)
+    fenced = parse_verdict('Вот разбор:\n```json\n{"score": "4", "relevant": "да", "grounded": null}\n```')
+    check("JSON в ограждении разобран",
+          fenced.score == 4 and fenced.relevant is True and fenced.grounded is None)
+    broken = parse_verdict("модель забыла про JSON")
+    check("текст без JSON не роняет разбор", broken.score is None and bool(broken.raw))
+    check("строка вердикта читаема", "оценка 5/5" in verdict_line(verdict))
+
+
 def test_live():
-    print("[6] Живой LM Studio")
+    print("[9] Живой LM Studio")
     client = LmClient()
     try:
         answer = client.send_message(
@@ -217,6 +271,9 @@ def main():
     test_rag_helper()
     test_chat_engine()
     test_forced_rag()
+    test_metrics()
+    test_golden_set()
+    test_judge_parsing()
     if "--live" in sys.argv:
         test_live()
 
