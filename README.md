@@ -12,7 +12,7 @@
 Вот как это выглядит вживую. Я спросил про статистику, и видно, что
 ответ пришёл из моих заметок в папке `data`.
 
-<img width="1306" height="595" alt="Image" src="https://github.com/user-attachments/assets/3bc34da0-bb02-4713-b013-066150632896" />
+<img width="1331" height="620" alt="Image" src="https://github.com/user-attachments/assets/0d2a0911-464c-4cff-9dbe-7fcb29497888" />
 
 ## Что умеет
 
